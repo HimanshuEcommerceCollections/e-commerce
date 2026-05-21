@@ -1,6 +1,10 @@
 package com.nexuscommerce.auth.exception;
 
 import com.nexuscommerce.common.dto.ApiResponse;
+import com.nexuscommerce.product.exception.CategoryNotFoundException;
+import com.nexuscommerce.product.exception.ProductNotFoundException;
+import com.nexuscommerce.product.exception.ProductOwnershipException;
+import com.nexuscommerce.product.exception.SkuAlreadyExistsException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.BadCredentialsException;
@@ -52,6 +56,30 @@ public class GlobalExceptionHandler {
 
         return ResponseEntity.badRequest()
                 .body(ApiResponse.error("Validation failed", fieldErrors));
+    }
+
+    @ExceptionHandler(ProductNotFoundException.class)
+    public ResponseEntity<ApiResponse<Void>> handleProductNotFound(ProductNotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(CategoryNotFoundException.class)
+    public ResponseEntity<ApiResponse<Void>> handleCategoryNotFound(CategoryNotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(ProductOwnershipException.class)
+    public ResponseEntity<ApiResponse<Void>> handleProductOwnership(ProductOwnershipException ex) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(SkuAlreadyExistsException.class)
+    public ResponseEntity<ApiResponse<Void>> handleSkuConflict(SkuAlreadyExistsException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ApiResponse.error(ex.getMessage()));
     }
 
     @ExceptionHandler(Exception.class)

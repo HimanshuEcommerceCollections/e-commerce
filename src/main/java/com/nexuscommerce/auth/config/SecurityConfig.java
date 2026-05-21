@@ -30,7 +30,8 @@ public class SecurityConfig {
 
     private static final String[] PUBLIC_ENDPOINTS = {
         "/api/auth/**",
-        // Add future public endpoints here (e.g. "/api/products/public/**")
+        "/api/products/**",
+        "/api/categories/**"
     };
 
     @Bean
