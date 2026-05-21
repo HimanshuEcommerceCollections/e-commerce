@@ -5,21 +5,13 @@ import com.nexuscommerce.product.dto.ProductSummaryResponse;
 import com.nexuscommerce.product.entity.Product;
 import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
-import org.mapstruct.Named;
-
-import java.util.List;
 
 @Mapper(componentModel = "spring", uses = {CategoryMapper.class})
 public interface ProductMapper {
 
-    @Mapping(source = "category.name", target = "categoryName")
-    @Mapping(source = "imageUrls", target = "primaryImageUrl", qualifiedByName = "firstImage")
+    @Mapping(target = "categoryName", expression = "java(product.getCategory() != null ? product.getCategory().getName() : null)")
+    @Mapping(target = "primaryImageUrl", expression = "java(product.getImageUrls() != null && !product.getImageUrls().isEmpty() ? product.getImageUrls().get(0) : null)")
     ProductSummaryResponse toSummaryResponse(Product product);
 
     ProductDetailResponse toDetailResponse(Product product);
-
-    @Named("firstImage")
-    default String firstImage(List<String> imageUrls) {
-        return imageUrls == null || imageUrls.isEmpty() ? null : imageUrls.get(0);
-    }
 }
