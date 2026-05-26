@@ -1,5 +1,8 @@
 package com.nexuscommerce.auth.exception;
 
+import com.nexuscommerce.cart.exception.CartItemNotFoundException;
+import com.nexuscommerce.cart.exception.InsufficientStockException;
+import com.nexuscommerce.cart.exception.ProductNotAvailableException;
 import com.nexuscommerce.common.dto.ApiResponse;
 import com.nexuscommerce.product.exception.CategoryNotFoundException;
 import com.nexuscommerce.product.exception.ProductNotFoundException;
@@ -79,6 +82,24 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(SkuAlreadyExistsException.class)
     public ResponseEntity<ApiResponse<Void>> handleSkuConflict(SkuAlreadyExistsException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(CartItemNotFoundException.class)
+    public ResponseEntity<ApiResponse<Void>> handleCartItemNotFound(CartItemNotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(InsufficientStockException.class)
+    public ResponseEntity<ApiResponse<Void>> handleInsufficientStock(InsufficientStockException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(ProductNotAvailableException.class)
+    public ResponseEntity<ApiResponse<Void>> handleProductNotAvailable(ProductNotAvailableException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(ApiResponse.error(ex.getMessage()));
     }
 
