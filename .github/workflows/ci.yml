@@ -37,6 +37,9 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
+      - name: Grant execute permission to mvnw
+        run: chmod +x mvnw
+
       - name: Build, test & coverage
         env:
           SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/nexus_commerce
