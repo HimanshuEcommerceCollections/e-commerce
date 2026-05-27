@@ -34,3 +34,7 @@ build/
 
 ### Claude Code ###
 .claude/
+
+### Environment variables ###
+.env
+!.env.example

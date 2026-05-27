@@ -1,5 +1,7 @@
 package com.nexuscommerce.auth.exception;
 
+import com.nexuscommerce.user.address.exception.AddressLimitExceededException;
+import com.nexuscommerce.user.address.exception.AddressNotFoundException;
 import com.nexuscommerce.cart.exception.CartItemNotFoundException;
 import com.nexuscommerce.cart.exception.InsufficientStockException;
 import com.nexuscommerce.cart.exception.ProductNotAvailableException;
@@ -99,6 +101,18 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(ProductNotAvailableException.class)
     public ResponseEntity<ApiResponse<Void>> handleProductNotAvailable(ProductNotAvailableException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(AddressNotFoundException.class)
+    public ResponseEntity<ApiResponse<Void>> handleAddressNotFound(AddressNotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(AddressLimitExceededException.class)
+    public ResponseEntity<ApiResponse<Void>> handleAddressLimitExceeded(AddressLimitExceededException ex) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(ApiResponse.error(ex.getMessage()));
     }
