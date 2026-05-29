@@ -20,7 +20,17 @@ public interface UserAddressRepository extends JpaRepository<UserAddress, UUID> 
 
     Optional<UserAddress> findTopByUserIdAndIdNotAndDeletedFalseOrderByCreatedAtDesc(UUID userId, UUID excludeId);
 
-    @Modifying(clearAutomatically = true)
+    @Modifying
     @Query("UPDATE UserAddress a SET a.isDefault = false WHERE a.userId = :userId AND a.deleted = false")
     void clearDefaultForUser(@Param("userId") UUID userId);
+
+    @Modifying
+    @Query("UPDATE UserAddress a SET a.isDefault = false WHERE a.userId = :userId AND a.id <> :excludeId AND a.deleted = false")
+    void clearDefaultForUserExcept(@Param("userId") UUID userId, @Param("excludeId") UUID excludeId);
+
+    // Postgres advisory lock scoped to the current transaction. Serializes concurrent
+    // address mutations for the same user so the per-user invariants (max-per-user count,
+    // single default) hold without relying on application-level race windows.
+    @Query(value = "SELECT pg_advisory_xact_lock(hashtext(:key))", nativeQuery = true)
+    void acquireUserMutationLock(@Param("key") String key);
 }

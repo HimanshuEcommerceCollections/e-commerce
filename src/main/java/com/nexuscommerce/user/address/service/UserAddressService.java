@@ -7,11 +7,11 @@ import com.nexuscommerce.user.address.exception.AddressLimitExceededException;
 import com.nexuscommerce.user.address.exception.AddressNotFoundException;
 import com.nexuscommerce.user.address.repository.UserAddressRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.UUID;
 
 @Service
@@ -19,18 +19,20 @@ import java.util.UUID;
 @Transactional(readOnly = true)
 public class UserAddressService {
 
-    private static final int MAX_ADDRESSES = 5;
-
     private final UserAddressRepository addressRepository;
+
+    @Value("${app.user.address.max-per-user:5}")
+    private int maxAddressesPerUser;
 
     @Transactional
     public AddressResponse create(UUID userId, AddressRequest request) {
+        lockUser(userId);
+
         long count = addressRepository.countByUserIdAndDeletedFalse(userId);
-        if (count >= MAX_ADDRESSES) {
-            throw new AddressLimitExceededException();
+        if (count >= maxAddressesPerUser) {
+            throw new AddressLimitExceededException(maxAddressesPerUser);
         }
 
-        // First address is always default; explicit isDefault also triggers a swap
         boolean makeDefault = request.isDefault() || count == 0;
         if (makeDefault) {
             addressRepository.clearDefaultForUser(userId);
@@ -50,7 +52,7 @@ public class UserAddressService {
                 .isDefault(makeDefault)
                 .build();
 
-        return AddressResponse.from(Objects.requireNonNull(addressRepository.save(address)));
+        return AddressResponse.from(addressRepository.save(address));
     }
 
     public List<AddressResponse> findAll(UUID userId) {
@@ -66,10 +68,12 @@ public class UserAddressService {
 
     @Transactional
     public AddressResponse update(UUID userId, UUID addressId, AddressRequest request) {
+        lockUser(userId);
+
         UserAddress address = resolveOwned(userId, addressId);
 
         if (request.isDefault() && !address.isDefault()) {
-            addressRepository.clearDefaultForUser(userId);
+            addressRepository.clearDefaultForUserExcept(userId, addressId);
             address.setDefault(true);
         }
 
@@ -83,18 +87,19 @@ public class UserAddressService {
         address.setPostalCode(request.postalCode());
         address.setCountry(request.country());
 
-        return AddressResponse.from(Objects.requireNonNull(addressRepository.save(address)));
+        return AddressResponse.from(addressRepository.save(address));
     }
 
     @Transactional
     public void delete(UUID userId, UUID addressId) {
+        lockUser(userId);
+
         UserAddress address = resolveOwned(userId, addressId);
         boolean wasDefault = address.isDefault();
 
         address.setDeleted(true);
         addressRepository.saveAndFlush(address);
 
-        // Promote the next most-recent address to default when the deleted one was default
         if (wasDefault) {
             addressRepository
                     .findTopByUserIdAndIdNotAndDeletedFalseOrderByCreatedAtDesc(userId, addressId)
@@ -107,14 +112,24 @@ public class UserAddressService {
 
     @Transactional
     public AddressResponse setDefault(UUID userId, UUID addressId) {
+        lockUser(userId);
+
         UserAddress address = resolveOwned(userId, addressId);
-        addressRepository.clearDefaultForUser(userId);
+        if (address.isDefault()) {
+            return AddressResponse.from(address);
+        }
+
+        addressRepository.clearDefaultForUserExcept(userId, addressId);
         address.setDefault(true);
-        return AddressResponse.from(Objects.requireNonNull(addressRepository.save(address)));
+        return AddressResponse.from(addressRepository.save(address));
     }
 
     private UserAddress resolveOwned(UUID userId, UUID addressId) {
         return addressRepository.findByIdAndUserIdAndDeletedFalse(addressId, userId)
                 .orElseThrow(() -> new AddressNotFoundException(addressId));
+    }
+
+    private void lockUser(UUID userId) {
+        addressRepository.acquireUserMutationLock("user_address:" + userId);
     }
 }
