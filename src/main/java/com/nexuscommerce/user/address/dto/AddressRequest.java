@@ -1,6 +1,7 @@
 package com.nexuscommerce.user.address.dto;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 public record AddressRequest(
@@ -14,6 +15,10 @@ public record AddressRequest(
     String recipientName,
 
     @Size(max = 20, message = "Phone must not exceed 20 characters")
+    @Pattern(
+        regexp = "^$|^\\+?[0-9 ()\\-]{6,20}$",
+        message = "Phone must contain only digits, spaces, parentheses, hyphens, and an optional leading '+'"
+    )
     String phone,
 
     @NotBlank(message = "Address line 1 is required")

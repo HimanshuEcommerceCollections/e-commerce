@@ -39,6 +39,10 @@ app:
     # Refresh token lifetime in milliseconds (default 7 days)
     refresh-expiration: ${JWT_REFRESH_EXPIRATION_MS:604800000}
 
+  user:
+    address:
+      max-per-user: ${USER_ADDRESS_MAX_PER_USER:5}
+
 # ── Server ────────────────────────────────────────────────────────────────────
 server:
   port: ${SERVER_PORT:8080}

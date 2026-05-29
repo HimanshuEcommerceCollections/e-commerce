@@ -6,6 +6,11 @@ import lombok.*;
 
 import java.util.UUID;
 
+// When a migration tool is introduced, add a partial unique index to enforce
+// the single-default invariant at the DB level (JPA cannot express WHERE clauses):
+//   CREATE UNIQUE INDEX uniq_user_addresses_default
+//   ON user_addresses (user_id) WHERE is_default = true AND deleted = false;
+// Until then, the service serializes per-user mutations via pg_advisory_xact_lock.
 @Entity
 @Table(
     name = "user_addresses",
