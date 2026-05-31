@@ -1,7 +1,10 @@
 package com.nexuscommerce.product.exception;
 
-public class SlugAlreadyExistsException extends RuntimeException {
+import com.nexuscommerce.common.exception.DomainException;
+import org.springframework.http.HttpStatus;
+
+public class SlugAlreadyExistsException extends DomainException {
     public SlugAlreadyExistsException(String slug) {
-        super("A category with slug '" + slug + "' already exists");
+        super(HttpStatus.CONFLICT, "A category with slug '" + slug + "' already exists");
     }
 }

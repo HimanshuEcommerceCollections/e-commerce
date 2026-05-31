@@ -1,7 +1,10 @@
 package com.nexuscommerce.product.exception;
 
-public class SkuAlreadyExistsException extends RuntimeException {
+import com.nexuscommerce.common.exception.DomainException;
+import org.springframework.http.HttpStatus;
+
+public class SkuAlreadyExistsException extends DomainException {
     public SkuAlreadyExistsException(String sku) {
-        super("A product with SKU '" + sku + "' already exists");
+        super(HttpStatus.CONFLICT, "A product with SKU '" + sku + "' already exists");
     }
 }

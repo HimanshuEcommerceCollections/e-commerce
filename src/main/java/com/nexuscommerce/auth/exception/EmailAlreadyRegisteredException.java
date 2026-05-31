@@ -1,8 +1,11 @@
 package com.nexuscommerce.auth.exception;
 
-public class EmailAlreadyRegisteredException extends RuntimeException {
+import com.nexuscommerce.common.exception.DomainException;
+import org.springframework.http.HttpStatus;
+
+public class EmailAlreadyRegisteredException extends DomainException {
 
     public EmailAlreadyRegisteredException(String email) {
-        super("An account is already registered for: " + email);
+        super(HttpStatus.CONFLICT, "An account is already registered for: " + email);
     }
 }
