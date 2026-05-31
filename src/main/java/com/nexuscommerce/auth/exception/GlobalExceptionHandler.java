@@ -8,10 +8,12 @@ import com.nexuscommerce.cart.exception.ProductNotAvailableException;
 import com.nexuscommerce.common.dto.ApiResponse;
 import com.nexuscommerce.product.exception.CategoryNotFoundException;
 import com.nexuscommerce.product.exception.ProductNotFoundException;
-import com.nexuscommerce.product.exception.ProductOwnershipException;
 import com.nexuscommerce.product.exception.SkuAlreadyExistsException;
+import com.nexuscommerce.product.exception.SlugAlreadyExistsException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.DisabledException;
 import org.springframework.security.authentication.LockedException;
@@ -75,14 +77,14 @@ public class GlobalExceptionHandler {
                 .body(ApiResponse.error(ex.getMessage()));
     }
 
-    @ExceptionHandler(ProductOwnershipException.class)
-    public ResponseEntity<ApiResponse<Void>> handleProductOwnership(ProductOwnershipException ex) {
-        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+    @ExceptionHandler(SkuAlreadyExistsException.class)
+    public ResponseEntity<ApiResponse<Void>> handleSkuConflict(SkuAlreadyExistsException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
                 .body(ApiResponse.error(ex.getMessage()));
     }
 
-    @ExceptionHandler(SkuAlreadyExistsException.class)
-    public ResponseEntity<ApiResponse<Void>> handleSkuConflict(SkuAlreadyExistsException ex) {
+    @ExceptionHandler(SlugAlreadyExistsException.class)
+    public ResponseEntity<ApiResponse<Void>> handleSlugConflict(SlugAlreadyExistsException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT)
                 .body(ApiResponse.error(ex.getMessage()));
     }
@@ -115,6 +117,29 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> handleAddressLimitExceeded(AddressLimitExceededException ex) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(ApiResponse.error(ex.getMessage()));
+    }
+
+    /**
+     * Concurrent-write backstop. A losing optimistic-lock update (stale
+     * {@code @Version}) means another request modified the row first; the
+     * client should re-fetch and retry.
+     */
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<ApiResponse<Void>> handleOptimisticLock(ObjectOptimisticLockingFailureException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ApiResponse.error("This resource was updated by another request. Please retry."));
+    }
+
+    /**
+     * Unique/foreign-key backstop. App-level checks (SKU, slug) catch the common
+     * cases with specific messages; this guards the check-then-insert race and
+     * any other constraint violation so it returns 409 rather than a generic 500.
+     * The DB message is intentionally not echoed back to avoid leaking schema details.
+     */
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ApiResponse<Void>> handleDataIntegrity(DataIntegrityViolationException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ApiResponse.error("The request conflicts with existing data"));
     }
 
     @ExceptionHandler(Exception.class)

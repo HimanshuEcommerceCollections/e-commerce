@@ -17,9 +17,13 @@ public interface ProductRepository extends JpaRepository<Product, UUID> {
 
     Page<Product> findByCategoryIdAndStatusAndDeletedFalse(UUID categoryId, ProductStatus status, Pageable pageable);
 
-    boolean existsBySkuAndDeletedFalse(String sku);
+    // SKU uniqueness is enforced globally by the uk_products_sku DB constraint,
+    // which covers soft-deleted rows too. These checks must match that scope
+    // (not deleted-aware) so the app rejects duplicates before the insert
+    // rather than letting it surface as a DataIntegrityViolation.
+    boolean existsBySku(String sku);
 
-    boolean existsBySkuAndIdNotAndDeletedFalse(String sku, UUID id);
+    boolean existsBySkuAndIdNot(String sku, UUID id);
 
     Optional<Product> findByIdAndDeletedFalse(UUID id);
 }

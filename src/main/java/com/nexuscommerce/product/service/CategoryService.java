@@ -4,6 +4,7 @@ import com.nexuscommerce.product.dto.CategoryCreateRequest;
 import com.nexuscommerce.product.dto.CategoryResponse;
 import com.nexuscommerce.product.entity.ProductCategory;
 import com.nexuscommerce.product.exception.CategoryNotFoundException;
+import com.nexuscommerce.product.exception.SlugAlreadyExistsException;
 import com.nexuscommerce.product.mapper.CategoryMapper;
 import com.nexuscommerce.product.repository.ProductCategoryRepository;
 import lombok.RequiredArgsConstructor;
@@ -22,6 +23,10 @@ public class CategoryService {
     private final CategoryMapper categoryMapper;
 
     public CategoryResponse create(CategoryCreateRequest request) {
+        if (categoryRepository.existsBySlug(request.slug())) {
+            throw new SlugAlreadyExistsException(request.slug());
+        }
+
         ProductCategory category = ProductCategory.builder()
                 .name(request.name())
                 .slug(request.slug())

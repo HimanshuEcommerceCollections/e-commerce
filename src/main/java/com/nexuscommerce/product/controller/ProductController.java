@@ -1,5 +1,6 @@
 package com.nexuscommerce.product.controller;
 
+import com.nexuscommerce.auth.entity.UserRole;
 import com.nexuscommerce.auth.security.CustomerUserDetails;
 import com.nexuscommerce.common.dto.ApiResponse;
 import com.nexuscommerce.product.dto.ProductCreateRequest;
@@ -34,8 +35,12 @@ public class ProductController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<ApiResponse<ProductDetailResponse>> findById(@PathVariable UUID id) {
-        return ResponseEntity.ok(ApiResponse.ok(productService.findById(id)));
+    public ResponseEntity<ApiResponse<ProductDetailResponse>> findById(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal CustomerUserDetails principal) {
+        UUID requesterId = principal != null ? principal.getUser().getId() : null;
+        boolean isAdmin = principal != null && principal.getUser().getRole() == UserRole.ROLE_ADMIN;
+        return ResponseEntity.ok(ApiResponse.ok(productService.findById(id, requesterId, isAdmin)));
     }
 
     @GetMapping("/my")

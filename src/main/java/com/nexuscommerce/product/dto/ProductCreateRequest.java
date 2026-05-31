@@ -1,5 +1,6 @@
 package com.nexuscommerce.product.dto;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
@@ -17,5 +18,5 @@ public record ProductCreateRequest(
         @NotNull @PositiveOrZero Integer stockQuantity,
         @NotBlank @Size(max = 100) String sku,
         UUID categoryId,
-        @Size(max = 10) List<String> imageUrls
+        @Valid @Size(max = 10) List<ProductImageRequest> images
 ) {}

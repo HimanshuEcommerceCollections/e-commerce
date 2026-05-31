@@ -41,11 +41,10 @@ public class Product extends BaseEntity {
     @Builder.Default
     private ProductStatus status = ProductStatus.DRAFT;
 
-    @ElementCollection(fetch = FetchType.LAZY)
-    @CollectionTable(name = "product_images", joinColumns = @JoinColumn(name = "product_id"))
-    @Column(name = "image_url", length = 2048)
+    @OneToMany(mappedBy = "product", cascade = CascadeType.ALL, orphanRemoval = true)
+    @OrderBy("position ASC")
     @Builder.Default
-    private List<String> imageUrls = new ArrayList<>();
+    private List<ProductImage> images = new ArrayList<>();
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "category_id")
@@ -54,4 +53,36 @@ public class Product extends BaseEntity {
     // Stored as plain UUID — no @ManyToOne to User to keep modules decoupled
     @Column(nullable = false)
     private UUID merchantId;
+
+    // Optimistic lock — guards stockQuantity (and other fields) against lost
+    // updates under concurrent writes (e.g. simultaneous checkout decrements).
+    // Hibernate manages this column; it is intentionally not set via the builder.
+    @Version
+    private Long version;
+
+    // ── Image gallery helpers ───────────────────────────────────────────────
+    // Keep both sides of the bidirectional relationship in sync. Mutate this
+    // collection in place (never reassign it) so orphanRemoval can track deletes.
+
+    public void addImage(ProductImage image) {
+        image.setProduct(this);
+        images.add(image);
+    }
+
+    public void clearImages() {
+        images.clear();
+    }
+
+    /**
+     * URL of the primary image, or — if none is flagged primary — the first image
+     * by display order. {@code null} when the product has no images.
+     */
+    public String getPrimaryImageUrl() {
+        return images.stream()
+                .filter(ProductImage::isPrimary)
+                .findFirst()
+                .or(() -> images.stream().findFirst())
+                .map(ProductImage::getUrl)
+                .orElse(null);
+    }
 }
