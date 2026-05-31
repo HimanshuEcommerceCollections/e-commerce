@@ -1,8 +1,11 @@
 package com.nexuscommerce.user.address.exception;
 
-public class AddressLimitExceededException extends RuntimeException {
+import com.nexuscommerce.common.exception.DomainException;
+import org.springframework.http.HttpStatus;
+
+public class AddressLimitExceededException extends DomainException {
 
     public AddressLimitExceededException(int limit) {
-        super("You can save a maximum of " + limit + " addresses per account");
+        super(HttpStatus.BAD_REQUEST, "You can save a maximum of " + limit + " addresses per account");
     }
 }

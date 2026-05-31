@@ -1,15 +1,6 @@
-package com.nexuscommerce.auth.exception;
+package com.nexuscommerce.common.exception;
 
-import com.nexuscommerce.user.address.exception.AddressLimitExceededException;
-import com.nexuscommerce.user.address.exception.AddressNotFoundException;
-import com.nexuscommerce.cart.exception.CartItemNotFoundException;
-import com.nexuscommerce.cart.exception.InsufficientStockException;
-import com.nexuscommerce.cart.exception.ProductNotAvailableException;
 import com.nexuscommerce.common.dto.ApiResponse;
-import com.nexuscommerce.product.exception.CategoryNotFoundException;
-import com.nexuscommerce.product.exception.ProductNotFoundException;
-import com.nexuscommerce.product.exception.SkuAlreadyExistsException;
-import com.nexuscommerce.product.exception.SlugAlreadyExistsException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -28,11 +19,18 @@ import java.util.stream.Collectors;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
-    @ExceptionHandler(EmailAlreadyRegisteredException.class)
-    public ResponseEntity<ApiResponse<Void>> handleEmailConflict(EmailAlreadyRegisteredException ex) {
-        return ResponseEntity.status(HttpStatus.CONFLICT)
+    // ── Domain exceptions ───────────────────────────────────────────────────
+    // Any DomainException renders with the HTTP status it carries. Feature
+    // modules add new exceptions extending DomainException without touching this
+    // class, so it stays decoupled from product/cart/order/etc.
+
+    @ExceptionHandler(DomainException.class)
+    public ResponseEntity<ApiResponse<Void>> handleDomain(DomainException ex) {
+        return ResponseEntity.status(ex.getStatus().value())
                 .body(ApiResponse.error(ex.getMessage()));
     }
+
+    // ── Spring Security ──────────────────────────────────────────────────────
 
     @ExceptionHandler(BadCredentialsException.class)
     public ResponseEntity<ApiResponse<Void>> handleBadCredentials(BadCredentialsException ex) {
@@ -52,6 +50,8 @@ public class GlobalExceptionHandler {
                 .body(ApiResponse.error("This account is temporarily locked"));
     }
 
+    // ── Request validation ─────────────────────────────────────────────────
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ApiResponse<Map<String, String>>> handleValidation(MethodArgumentNotValidException ex) {
         Map<String, String> fieldErrors = ex.getBindingResult().getFieldErrors().stream()
@@ -65,59 +65,7 @@ public class GlobalExceptionHandler {
                 .body(ApiResponse.error("Validation failed", fieldErrors));
     }
 
-    @ExceptionHandler(ProductNotFoundException.class)
-    public ResponseEntity<ApiResponse<Void>> handleProductNotFound(ProductNotFoundException ex) {
-        return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(ApiResponse.error(ex.getMessage()));
-    }
-
-    @ExceptionHandler(CategoryNotFoundException.class)
-    public ResponseEntity<ApiResponse<Void>> handleCategoryNotFound(CategoryNotFoundException ex) {
-        return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(ApiResponse.error(ex.getMessage()));
-    }
-
-    @ExceptionHandler(SkuAlreadyExistsException.class)
-    public ResponseEntity<ApiResponse<Void>> handleSkuConflict(SkuAlreadyExistsException ex) {
-        return ResponseEntity.status(HttpStatus.CONFLICT)
-                .body(ApiResponse.error(ex.getMessage()));
-    }
-
-    @ExceptionHandler(SlugAlreadyExistsException.class)
-    public ResponseEntity<ApiResponse<Void>> handleSlugConflict(SlugAlreadyExistsException ex) {
-        return ResponseEntity.status(HttpStatus.CONFLICT)
-                .body(ApiResponse.error(ex.getMessage()));
-    }
-
-    @ExceptionHandler(CartItemNotFoundException.class)
-    public ResponseEntity<ApiResponse<Void>> handleCartItemNotFound(CartItemNotFoundException ex) {
-        return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(ApiResponse.error(ex.getMessage()));
-    }
-
-    @ExceptionHandler(InsufficientStockException.class)
-    public ResponseEntity<ApiResponse<Void>> handleInsufficientStock(InsufficientStockException ex) {
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(ApiResponse.error(ex.getMessage()));
-    }
-
-    @ExceptionHandler(ProductNotAvailableException.class)
-    public ResponseEntity<ApiResponse<Void>> handleProductNotAvailable(ProductNotAvailableException ex) {
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(ApiResponse.error(ex.getMessage()));
-    }
-
-    @ExceptionHandler(AddressNotFoundException.class)
-    public ResponseEntity<ApiResponse<Void>> handleAddressNotFound(AddressNotFoundException ex) {
-        return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(ApiResponse.error(ex.getMessage()));
-    }
-
-    @ExceptionHandler(AddressLimitExceededException.class)
-    public ResponseEntity<ApiResponse<Void>> handleAddressLimitExceeded(AddressLimitExceededException ex) {
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(ApiResponse.error(ex.getMessage()));
-    }
+    // ── Persistence / concurrency backstops ──────────────────────────────────
 
     /**
      * Concurrent-write backstop. A losing optimistic-lock update (stale
@@ -141,6 +89,8 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.CONFLICT)
                 .body(ApiResponse.error("The request conflicts with existing data"));
     }
+
+    // ── Catch-all ────────────────────────────────────────────────────────────
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiResponse<Void>> handleUnexpected(Exception ex) {
