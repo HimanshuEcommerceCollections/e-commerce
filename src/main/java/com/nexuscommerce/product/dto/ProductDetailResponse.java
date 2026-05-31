@@ -16,7 +16,7 @@ public record ProductDetailResponse(
         String sku,
         ProductStatus status,
         CategoryResponse category,
-        List<String> imageUrls,
+        List<ProductImageResponse> images,
         UUID merchantId,
         Instant createdAt,
         Instant updatedAt

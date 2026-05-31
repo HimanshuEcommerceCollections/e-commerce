@@ -141,8 +141,7 @@ public class CartService {
 
     private CartItemResponse buildCartItemResponse(CartItem item, Product product) {
         boolean available = product.getStatus() == ProductStatus.ACTIVE;
-        String primaryImageUrl = product.getImageUrls() != null && !product.getImageUrls().isEmpty()
-                ? product.getImageUrls().get(0) : null;
+        String primaryImageUrl = product.getPrimaryImageUrl();
         BigDecimal subtotal = available
                 ? product.getPrice().multiply(BigDecimal.valueOf(item.getQuantity()))
                 : BigDecimal.ZERO;

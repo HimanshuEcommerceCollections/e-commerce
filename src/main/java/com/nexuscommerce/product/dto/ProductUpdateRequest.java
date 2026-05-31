@@ -1,6 +1,7 @@
 package com.nexuscommerce.product.dto;
 
 import com.nexuscommerce.product.entity.ProductStatus;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
 import jakarta.validation.constraints.Size;
@@ -17,5 +18,5 @@ public record ProductUpdateRequest(
         @Size(max = 100) String sku,
         ProductStatus status,
         UUID categoryId,
-        @Size(max = 10) List<String> imageUrls
+        @Valid @Size(max = 10) List<ProductImageRequest> images
 ) {}
