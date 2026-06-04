@@ -5,6 +5,9 @@ import com.nexuscommerce.product.entity.ProductStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import java.util.Optional;
 import java.util.UUID;
@@ -26,4 +29,26 @@ public interface ProductRepository extends JpaRepository<Product, UUID> {
     boolean existsBySkuAndIdNot(String sku, UUID id);
 
     Optional<Product> findByIdAndDeletedFalse(UUID id);
+
+    // ── Stock movements ───────────────────────────────────────────────────────
+    // Atomic conditional decrement: the `stockQuantity >= :qty` guard makes the
+    // check-and-decrement a single statement, so concurrent checkouts of the last
+    // units can never oversell — no row lock, no retry. A return of 0 means the
+    // product is gone/inactive or stock was insufficient; the caller distinguishes.
+    // (Bulk updates bypass @Version, which is fine: the WHERE clause is the guard.)
+    @Modifying
+    @Query("""
+            UPDATE Product p
+               SET p.stockQuantity = p.stockQuantity - :qty
+             WHERE p.id = :id
+               AND p.deleted = false
+               AND p.status = com.nexuscommerce.product.entity.ProductStatus.ACTIVE
+               AND p.stockQuantity >= :qty
+            """)
+    int decrementStock(@Param("id") UUID id, @Param("qty") int qty);
+
+    /** Return units to stock — used when an order is cancelled/refunded. */
+    @Modifying
+    @Query("UPDATE Product p SET p.stockQuantity = p.stockQuantity + :qty WHERE p.id = :id")
+    int incrementStock(@Param("id") UUID id, @Param("qty") int qty);
 }
