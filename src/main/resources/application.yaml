@@ -16,10 +16,20 @@ spring:
       idle-timeout: 600000
       max-lifetime: 1800000
 
+  # ── Schema migrations (Flyway) ──────────────────────────────────────────────
+  # Flyway owns the schema; Hibernate only validates against it (ddl-auto: validate).
+  # baseline-on-migrate lets an existing (pre-Flyway) database adopt migrations:
+  # it is baselined at V1 (assumed already present) and only V2+ are applied. A
+  # fresh/empty database (CI, new dev) runs every migration from V1.
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: 1
+
   # ── JPA / Hibernate ───────────────────────────────────────────────────────
   jpa:
     hibernate:
-      ddl-auto: ${JPA_DDL_AUTO:update}   # use 'validate' in production with Flyway/Liquibase
+      ddl-auto: ${JPA_DDL_AUTO:validate}   # Flyway owns the schema; Hibernate only validates
     show-sql: false
     open-in-view: false
     properties:
@@ -42,6 +52,11 @@ app:
   user:
     address:
       max-per-user: ${USER_ADDRESS_MAX_PER_USER:5}
+
+  order:
+    # ISO-4217 currency code stamped onto every order. Single-currency for now;
+    # revisit when multi-currency / per-merchant pricing is introduced.
+    currency: ${ORDER_CURRENCY:USD}
 
 # ── Server ────────────────────────────────────────────────────────────────────
 server:
