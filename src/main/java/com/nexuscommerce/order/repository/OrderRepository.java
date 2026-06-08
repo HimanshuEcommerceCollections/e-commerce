@@ -16,6 +16,9 @@ public interface OrderRepository extends JpaRepository<Order, UUID> {
     /** Unscoped lookup for admin/system operations (e.g. manual payment confirmation). */
     Optional<Order> findByIdAndDeletedFalse(UUID id);
 
+    /** Unscoped lookup used by the Stripe webhook to reconcile an event to its order. */
+    Optional<Order> findByPaymentIntentIdAndDeletedFalse(String paymentIntentId);
+
     Page<Order> findByUserIdAndDeletedFalseOrderByCreatedAtDesc(UUID userId, Pageable pageable);
 
     boolean existsByOrderNumber(String orderNumber);

@@ -31,7 +31,10 @@ public class SecurityConfig {
     private static final String[] PUBLIC_ENDPOINTS = {
         "/api/auth/**",
         "/api/products/**",
-        "/api/categories/**"
+        "/api/categories/**",
+        // Stripe webhook: no JWT (Stripe sends none); authenticity is verified
+        // from the Stripe-Signature header in StripeWebhookService.
+        "/api/payments/stripe/webhook"
     };
 
     @Bean
