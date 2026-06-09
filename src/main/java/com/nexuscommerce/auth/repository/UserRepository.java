@@ -18,6 +18,8 @@ public interface UserRepository extends JpaRepository<User, UUID> {
 
     boolean existsByEmail(String email);
 
+    boolean existsByPhoneNumber(String phoneNumber);
+
     List<User> findAllByRole(UserRole role);
 
     /** Stamp last-login without a full entity round-trip */

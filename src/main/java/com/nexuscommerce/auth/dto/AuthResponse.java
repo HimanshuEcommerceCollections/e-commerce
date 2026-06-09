@@ -23,9 +23,8 @@ public record AuthResponse(
 
     UUID userId,
     String email,
-    String firstName,
-    String lastName,
-    String displayName,
+    String fullName,
+    String phoneNumber,
     UserRole role,
     Instant issuedAt
 ) {
@@ -36,9 +35,8 @@ public record AuthResponse(
             expiresIn,
             user.getId(),
             user.getEmail(),
-            user.getFirstName(),
-            user.getLastName(),
-            user.getDisplayName(),
+            user.getFullName(),
+            user.getPhoneNumber(),
             user.getRole(),
             Instant.now()
         );

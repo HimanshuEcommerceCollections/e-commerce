@@ -9,7 +9,10 @@ import java.time.Instant;
 @Entity
 @Table(
     name = "users",
-    uniqueConstraints = @UniqueConstraint(columnNames = "email", name = "uk_users_email")
+    uniqueConstraints = {
+        @UniqueConstraint(columnNames = "email", name = "uk_users_email"),
+        @UniqueConstraint(columnNames = "phone_number", name = "uk_users_phone")
+    }
 )
 @Getter
 @Setter
@@ -24,14 +27,12 @@ public class User extends BaseEntity {
     @Column(nullable = false)
     private String password;
 
-    @Column(nullable = false, length = 100)
-    private String firstName;
+    @Column(nullable = false, length = 200)
+    private String fullName;
 
-    @Column(nullable = false, length = 100)
-    private String lastName;
-
-    @Column(length = 200)
-    private String displayName;
+    /** Optional for legacy accounts; unique when present. */
+    @Column(length = 20)
+    private String phoneNumber;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
@@ -46,8 +47,4 @@ public class User extends BaseEntity {
     private boolean accountNonLocked = true;
 
     private Instant lastLoginAt;
-
-    public String getFullName() {
-        return firstName + " " + lastName;
-    }
 }
