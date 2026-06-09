@@ -5,6 +5,7 @@ import com.nexuscommerce.cart.entity.CartItem;
 import com.nexuscommerce.cart.repository.CartItemRepository;
 import com.nexuscommerce.cart.repository.CartRepository;
 import com.nexuscommerce.order.dto.CheckoutRequest;
+import com.nexuscommerce.order.dto.CheckoutResponse;
 import com.nexuscommerce.order.dto.OrderResponse;
 import com.nexuscommerce.order.dto.OrderSummaryResponse;
 import com.nexuscommerce.order.entity.Order;
@@ -16,6 +17,7 @@ import com.nexuscommerce.order.exception.OrderNotFoundException;
 import com.nexuscommerce.order.exception.OutOfStockException;
 import com.nexuscommerce.order.exception.ProductUnavailableException;
 import com.nexuscommerce.order.repository.OrderRepository;
+import com.nexuscommerce.payment.PaymentEventHandler;
 import com.nexuscommerce.payment.PaymentGateway;
 import com.nexuscommerce.payment.PaymentInitiation;
 import com.nexuscommerce.payment.PaymentRequest;
@@ -27,6 +29,7 @@ import com.nexuscommerce.user.address.entity.UserAddress;
 import com.nexuscommerce.user.address.exception.AddressNotFoundException;
 import com.nexuscommerce.user.address.repository.UserAddressRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -39,10 +42,11 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional(readOnly = true)
-public class OrderService {
+public class OrderService implements PaymentEventHandler {
 
     private final OrderRepository orderRepository;
     private final CartRepository cartRepository;
@@ -62,7 +66,7 @@ public class OrderService {
      * isn't created.
      */
     @Transactional
-    public OrderResponse checkout(UUID userId, CheckoutRequest request) {
+    public CheckoutResponse checkout(UUID userId, CheckoutRequest request) {
         Cart cart = cartRepository.findByUserIdAndDeletedFalse(userId)
                 .orElseThrow(EmptyCartException::new);
 
@@ -106,18 +110,22 @@ public class OrderService {
 
         applyTotals(order, subtotal);
 
-        // Initiate payment (manual today → PENDING; Stripe later → returns a client secret).
+        // Initiate payment. Manual → PENDING with a generated reference; Stripe →
+        // PENDING with a PaymentIntent id + a clientSecret the client confirms with.
         PaymentInitiation payment = paymentGateway.initiate(
                 new PaymentRequest(order.getOrderNumber(), order.getGrandTotal(), order.getCurrency()));
         order.setPaymentStatus(payment.status());
         order.setPaymentReference(payment.reference());
+        // Stored so the Stripe webhook can reconcile its event back to this order.
+        order.setPaymentIntentId(payment.reference());
 
         Order saved = orderRepository.save(order);
 
         // Cart consumed by the order — soft-delete its items.
         items.forEach(i -> i.setDeleted(true));
 
-        return OrderResponse.from(saved);
+        // clientSecret is returned to the client but never persisted on the order.
+        return CheckoutResponse.of(OrderResponse.from(saved), payment.clientSecret());
     }
 
     public Page<OrderSummaryResponse> findMyOrders(UUID userId, Pageable pageable) {
@@ -169,6 +177,64 @@ public class OrderService {
         order.setStatus(OrderStatus.PAID);
         order.setPaymentStatus(PaymentStatus.SUCCEEDED);
         return OrderResponse.from(order);
+    }
+
+    /**
+     * Mark an order paid in response to a verified gateway event (the Stripe
+     * {@code payment_intent.succeeded} webhook). Looked up by PaymentIntent id.
+     *
+     * <p>Idempotent: an unknown intent is logged and ignored (so the provider
+     * stops retrying), and an order already {@code PAID} is a no-op — webhooks are
+     * delivered at-least-once.
+     */
+    @Override
+    @Transactional
+    public void confirmPaymentByIntent(String paymentIntentId) {
+        Order order = orderRepository.findByPaymentIntentIdAndDeletedFalse(paymentIntentId).orElse(null);
+        if (order == null) {
+            log.warn("Payment succeeded for unknown intent {} — ignoring", paymentIntentId);
+            return;
+        }
+        if (order.getStatus() == OrderStatus.PAID) {
+            return; // already reconciled by an earlier delivery of this event
+        }
+        if (order.getStatus() != OrderStatus.PENDING_PAYMENT) {
+            log.warn("Ignoring payment success for order {} in unexpected state {}",
+                    order.getOrderNumber(), order.getStatus());
+            return;
+        }
+        order.setStatus(OrderStatus.PAID);
+        order.setPaymentStatus(PaymentStatus.SUCCEEDED);
+    }
+
+    /**
+     * Record a failed/declined payment from a verified gateway event (the Stripe
+     * {@code payment_intent.payment_failed} webhook) and release the stock that
+     * checkout reserved, since the order will not be paid. Looked up by
+     * PaymentIntent id; idempotent for the same reasons as
+     * {@link #confirmPaymentByIntent(String)}.
+     */
+    @Override
+    @Transactional
+    public void failPaymentByIntent(String paymentIntentId) {
+        Order order = orderRepository.findByPaymentIntentIdAndDeletedFalse(paymentIntentId).orElse(null);
+        if (order == null) {
+            log.warn("Payment failed for unknown intent {} — ignoring", paymentIntentId);
+            return;
+        }
+        if (order.getStatus() == OrderStatus.PAYMENT_FAILED) {
+            return; // already reconciled
+        }
+        if (order.getStatus() != OrderStatus.PENDING_PAYMENT) {
+            log.warn("Ignoring payment failure for order {} in unexpected state {}",
+                    order.getOrderNumber(), order.getStatus());
+            return;
+        }
+        // Return the units reserved at checkout — the payment will not complete.
+        order.getItems().forEach(item ->
+                productRepository.incrementStock(item.getProductId(), item.getQuantity()));
+        order.setStatus(OrderStatus.PAYMENT_FAILED);
+        order.setPaymentStatus(PaymentStatus.FAILED);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

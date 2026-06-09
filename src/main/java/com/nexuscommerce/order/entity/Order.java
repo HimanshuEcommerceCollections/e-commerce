@@ -25,7 +25,10 @@ import java.util.UUID;
 @Table(
     name = "orders",
     uniqueConstraints = @UniqueConstraint(columnNames = "order_number", name = "uk_orders_order_number"),
-    indexes = @Index(name = "idx_orders_user_id", columnList = "user_id, deleted")
+    indexes = {
+        @Index(name = "idx_orders_user_id", columnList = "user_id, deleted"),
+        @Index(name = "idx_orders_payment_intent_id", columnList = "payment_intent_id")
+    }
 )
 @Getter
 @Setter
@@ -74,11 +77,15 @@ public class Order extends BaseEntity {
     @Column(length = 20)
     private PaymentStatus paymentStatus;
 
-    /** Gateway reference for reconciliation (generated id today, Stripe id later). */
+    /** Gateway reference for reconciliation (a manual id, or the Stripe PaymentIntent id). */
     @Column(length = 255)
     private String paymentReference;
 
-    /** Reserved for Stripe — the PaymentIntent id. Unused by the manual gateway. */
+    /**
+     * The gateway's PaymentIntent id. Under Stripe it keys the webhook lookup that
+     * reconciles an event back to this order; under the manual gateway it mirrors
+     * the generated reference.
+     */
     @Column(length = 255)
     private String paymentIntentId;
 

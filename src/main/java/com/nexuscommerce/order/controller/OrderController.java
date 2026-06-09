@@ -3,6 +3,7 @@ package com.nexuscommerce.order.controller;
 import com.nexuscommerce.auth.security.CustomerUserDetails;
 import com.nexuscommerce.common.dto.ApiResponse;
 import com.nexuscommerce.order.dto.CheckoutRequest;
+import com.nexuscommerce.order.dto.CheckoutResponse;
 import com.nexuscommerce.order.dto.OrderResponse;
 import com.nexuscommerce.order.dto.OrderSummaryResponse;
 import com.nexuscommerce.order.service.OrderService;
@@ -29,12 +30,12 @@ public class OrderController {
     /** Place an order from the caller's cart. */
     @PostMapping
     @PreAuthorize("hasRole('CUSTOMER')")
-    public ResponseEntity<ApiResponse<OrderResponse>> checkout(
+    public ResponseEntity<ApiResponse<CheckoutResponse>> checkout(
             @Valid @RequestBody CheckoutRequest request,
             @AuthenticationPrincipal CustomerUserDetails principal) {
-        OrderResponse order = orderService.checkout(principal.getUser().getId(), request);
+        CheckoutResponse result = orderService.checkout(principal.getUser().getId(), request);
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(ApiResponse.created("Order placed successfully", order));
+                .body(ApiResponse.created("Order placed successfully", result));
     }
 
     /** List the caller's orders, newest first. */

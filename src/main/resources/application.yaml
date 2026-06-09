@@ -58,6 +58,16 @@ app:
     # revisit when multi-currency / per-merchant pricing is introduced.
     currency: ${ORDER_CURRENCY:USD}
 
+  payment:
+    # Active payment gateway: 'manual' (default — orders rest in PENDING_PAYMENT
+    # until an admin confirms) or 'stripe'. Selects exactly one PaymentGateway bean.
+    provider: ${PAYMENT_PROVIDER:manual}
+    stripe:
+      # Secret API key (sk_test_… / sk_live_…). Only required when provider=stripe.
+      secret-key: ${STRIPE_SECRET_KEY:}
+      # Signing secret (whsec_…) used to verify inbound webhook signatures.
+      webhook-secret: ${STRIPE_WEBHOOK_SECRET:}
+
 # ── Server ────────────────────────────────────────────────────────────────────
 server:
   port: ${SERVER_PORT:8080}
