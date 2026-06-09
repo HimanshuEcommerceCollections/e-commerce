@@ -6,6 +6,7 @@ import com.nexuscommerce.auth.dto.RegisterRequest;
 import com.nexuscommerce.auth.entity.User;
 import com.nexuscommerce.auth.entity.UserRole;
 import com.nexuscommerce.auth.exception.EmailAlreadyRegisteredException;
+import com.nexuscommerce.auth.exception.PhoneAlreadyRegisteredException;
 import com.nexuscommerce.auth.repository.UserRepository;
 import com.nexuscommerce.auth.security.CustomerUserDetails;
 import lombok.RequiredArgsConstructor;
@@ -37,16 +38,17 @@ public class AuthService {
         if (userRepository.existsByEmail(request.email())) {
             throw new EmailAlreadyRegisteredException(request.email());
         }
+        if (userRepository.existsByPhoneNumber(request.phoneNumber())) {
+            throw new PhoneAlreadyRegisteredException(request.phoneNumber());
+        }
 
-        UserRole role = request.role() != null ? request.role() : UserRole.ROLE_CUSTOMER;
-
+        // Public self-registration is customer-only — role is never taken from the client.
         User user = User.builder()
                 .email(request.email())
                 .password(passwordEncoder.encode(request.password()))
-                .firstName(request.firstName())
-                .lastName(request.lastName())
-                .displayName(request.displayName())
-                .role(role)
+                .fullName(request.fullName())
+                .phoneNumber(request.phoneNumber())
+                .role(UserRole.ROLE_CUSTOMER)
                 .build();
 
         User savedUser = userRepository.save(Objects.requireNonNull(user));

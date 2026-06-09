@@ -1,11 +1,11 @@
 package com.nexuscommerce.auth.dto;
 
-import com.nexuscommerce.auth.entity.UserRole;
 import jakarta.validation.constraints.*;
 
 /**
  * Payload for POST /api/auth/register.
- * role defaults to ROLE_CUSTOMER when omitted (handled in AuthService).
+ * Public self-registration is customer-only — the role is always
+ * ROLE_CUSTOMER (assigned server-side in AuthService), never taken from the client.
  */
 public record RegisterRequest(
 
@@ -18,18 +18,15 @@ public record RegisterRequest(
     @Size(min = 8, max = 100, message = "Password must be between 8 and 100 characters")
     String password,
 
-    @NotBlank(message = "First name is required")
-    @Size(max = 100, message = "First name must not exceed 100 characters")
-    String firstName,
+    @NotBlank(message = "Full name is required")
+    @Size(max = 200, message = "Full name must not exceed 200 characters")
+    String fullName,
 
-    @NotBlank(message = "Last name is required")
-    @Size(max = 100, message = "Last name must not exceed 100 characters")
-    String lastName,
-
-    /** Optional vanity name shown in the UI */
-    @Size(max = 200, message = "Display name must not exceed 200 characters")
-    String displayName,
-
-    /** When null the service defaults to ROLE_CUSTOMER */
-    UserRole role
+    @NotBlank(message = "Phone number is required")
+    @Pattern(
+        regexp = "^[+]?[0-9 ()-]{7,20}$",
+        message = "Must be a valid phone number"
+    )
+    @Size(max = 20, message = "Phone number must not exceed 20 characters")
+    String phoneNumber
 ) {}
