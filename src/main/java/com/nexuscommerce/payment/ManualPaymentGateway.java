@@ -3,6 +3,8 @@ package com.nexuscommerce.payment;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -27,4 +29,29 @@ public class ManualPaymentGateway implements PaymentGateway {
         // No client secret: there is nothing for the client to confirm in-app yet.
         return new PaymentInitiation(PaymentStatus.PENDING, reference, null);
     }
+
+    /**
+     * No money moved through this gateway, so a "refund" is purely an order-state
+     * affair — the operator returns the funds out-of-band. The generated
+     * reference keeps the log trail consistent with the real gateway.
+     */
+    @Override
+    public String refund(String paymentReference, BigDecimal amount, String currency) {
+        return "MANUAL-REFUND-" + UUID.randomUUID();
+    }
+
+    /** Nothing to cancel provider-side; always succeeds. */
+    @Override
+    public boolean cancelPayment(String paymentReference) {
+        return true;
+    }
+
+    /** Manual payments never have a client-side secret. */
+    @Override
+    public Optional<String> findClientSecret(String paymentReference) {
+        return Optional.empty();
+    }
+
+    // supportsAutomaticExpiry stays false (interface default): manual orders
+    // legitimately rest in PENDING_PAYMENT until an admin confirms them.
 }

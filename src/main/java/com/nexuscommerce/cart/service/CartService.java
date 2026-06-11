@@ -20,19 +20,27 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
 @Transactional
-@SuppressWarnings("null")
 public class CartService {
 
     private final CartRepository cartRepository;
     private final CartItemRepository cartItemRepository;
+    private final CartCreator cartCreator;
     private final ProductRepository productRepository;
 
-    @Transactional(readOnly = true)
+    /**
+     * Fetch (lazily creating) the caller's cart. Not read-only: the first GET
+     * creates the cart row, and a write inside a read-only transaction is never
+     * flushed — the previous version of this method "created" carts that didn't
+     * survive the request.
+     */
     public CartResponse getCart(UUID userId) {
         Cart cart = getOrCreateCart(userId);
         return buildCartResponse(cart);
@@ -49,12 +57,7 @@ public class CartService {
                     existing.setQuantity(newQty);
                 }, () -> {
                     validateStock(product, request.quantity());
-                    CartItem item = CartItem.builder()
-                            .cart(cart)
-                            .productId(request.productId())
-                            .quantity(request.quantity())
-                            .build();
-                    cartItemRepository.save(item);
+                    addNewLine(cart, request);
                 });
 
         return buildCartResponse(cart);
@@ -62,7 +65,7 @@ public class CartService {
 
     public CartResponse updateItem(UUID userId, UUID productId, CartItemUpdateRequest request) {
         Product product = validateProduct(productId);
-        Cart cart = getOrCreateCart(userId);
+        Cart cart = requireCart(userId, productId);
 
         CartItem item = cartItemRepository.findByCartIdAndProductIdAndDeletedFalse(cart.getId(), productId)
                 .orElseThrow(() -> new CartItemNotFoundException(productId));
@@ -74,21 +77,66 @@ public class CartService {
     }
 
     public void removeItem(UUID userId, UUID productId) {
-        Cart cart = getOrCreateCart(userId);
+        Cart cart = requireCart(userId, productId);
         CartItem item = cartItemRepository.findByCartIdAndProductIdAndDeletedFalse(cart.getId(), productId)
                 .orElseThrow(() -> new CartItemNotFoundException(productId));
         item.setDeleted(true);
     }
 
     public void clearCart(UUID userId) {
-        Cart cart = getOrCreateCart(userId);
-        cartItemRepository.findByCartIdAndDeletedFalse(cart.getId())
-                .forEach(item -> item.setDeleted(true));
+        // No cart → nothing to clear. Deliberately does not create one as a side
+        // effect (the previous version inserted an empty cart row on DELETE).
+        cartRepository.findByUserIdAndDeletedFalse(userId).ifPresent(cart ->
+                cartItemRepository.findByCartIdAndDeletedFalse(cart.getId())
+                        .forEach(item -> item.setDeleted(true)));
     }
 
+    /**
+     * Adding a previously-removed product un-deletes its most recent soft-deleted
+     * row (with the fresh quantity) instead of inserting another one — repeated
+     * remove/re-add no longer accumulates rows, and the V8 live-row unique index
+     * stays satisfiable. A brand-new product inserts; if two requests race the
+     * insert, the index rejects the loser with a 409 and the client's retry
+     * merges normally.
+     */
+    private void addNewLine(Cart cart, CartItemRequest request) {
+        cartItemRepository
+                .findFirstByCartIdAndProductIdAndDeletedTrueOrderByUpdatedAtDesc(cart.getId(), request.productId())
+                .ifPresentOrElse(removed -> {
+                    removed.setDeleted(false);
+                    removed.setQuantity(request.quantity());
+                }, () -> cartItemRepository.save(CartItem.builder()
+                        .cart(cart)
+                        .productId(request.productId())
+                        .quantity(request.quantity())
+                        .build()));
+    }
+
+    /**
+     * The V8 unique index makes concurrent creation safe: the loser of the race
+     * gets {@code null} back from {@link CartCreator} (its own small transaction
+     * rolled back) and re-fetches the winner's row.
+     */
     private Cart getOrCreateCart(UUID userId) {
         return cartRepository.findByUserIdAndDeletedFalse(userId)
-                .orElseGet(() -> cartRepository.save(Cart.builder().userId(userId).build()));
+                .orElseGet(() -> {
+                    Cart created = cartCreator.create(userId);
+                    return created != null
+                            ? created
+                            : cartRepository.findByUserIdAndDeletedFalse(userId)
+                                    .orElseThrow(() -> new IllegalStateException(
+                                            "Cart creation race left no live cart for user " + userId));
+                });
+    }
+
+    /**
+     * Mutations of existing lines never create a cart as a side effect: a user
+     * with no cart cannot have the line they are trying to change, so this is
+     * the same 404 as a missing line.
+     */
+    private Cart requireCart(UUID userId, UUID productId) {
+        return cartRepository.findByUserIdAndDeletedFalse(userId)
+                .orElseThrow(() -> new CartItemNotFoundException(productId));
     }
 
     private Product validateProduct(UUID productId) {
@@ -109,12 +157,19 @@ public class CartService {
     private CartResponse buildCartResponse(Cart cart) {
         List<CartItem> items = cartItemRepository.findByCartIdAndDeletedFalse(cart.getId());
 
+        // One batch product lookup for the whole cart (was one query per line).
+        Map<UUID, Product> products = productRepository
+                .findByIdInAndDeletedFalse(items.stream().map(CartItem::getProductId).toList())
+                .stream()
+                .collect(Collectors.toMap(Product::getId, Function.identity()));
+
         // Soft-deleted products are excluded (no data to display).
         // Products that exist but are not ACTIVE appear with available=false.
         List<CartItemResponse> itemResponses = items.stream()
-                .map(item -> productRepository.findByIdAndDeletedFalse(item.getProductId())
-                        .map(product -> buildCartItemResponse(item, product))
-                        .orElse(null))
+                .map(item -> {
+                    Product product = products.get(item.getProductId());
+                    return product != null ? buildCartItemResponse(item, product) : null;
+                })
                 .filter(r -> r != null)
                 .toList();
 

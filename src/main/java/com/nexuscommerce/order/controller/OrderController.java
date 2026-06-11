@@ -6,6 +6,7 @@ import com.nexuscommerce.order.dto.CheckoutRequest;
 import com.nexuscommerce.order.dto.CheckoutResponse;
 import com.nexuscommerce.order.dto.OrderResponse;
 import com.nexuscommerce.order.dto.OrderSummaryResponse;
+import com.nexuscommerce.order.service.CheckoutCoordinator;
 import com.nexuscommerce.order.service.OrderService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -26,14 +27,21 @@ import java.util.UUID;
 public class OrderController {
 
     private final OrderService orderService;
+    private final CheckoutCoordinator checkoutCoordinator;
 
-    /** Place an order from the caller's cart. */
+    /**
+     * Place an order from the caller's cart. An optional {@code Idempotency-Key}
+     * header makes the call replay-safe: retrying with the same key returns the
+     * already-created order instead of creating (and charging) a second one.
+     */
     @PostMapping
     @PreAuthorize("hasRole('CUSTOMER')")
     public ResponseEntity<ApiResponse<CheckoutResponse>> checkout(
             @Valid @RequestBody CheckoutRequest request,
+            @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
             @AuthenticationPrincipal CustomerUserDetails principal) {
-        CheckoutResponse result = orderService.checkout(principal.getUser().getId(), request);
+        CheckoutResponse result = checkoutCoordinator.checkout(
+                principal.getUser().getId(), request, idempotencyKey);
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(ApiResponse.created("Order placed successfully", result));
     }
