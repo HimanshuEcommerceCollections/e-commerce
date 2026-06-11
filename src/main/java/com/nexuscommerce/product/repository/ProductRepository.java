@@ -9,6 +9,8 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -29,6 +31,9 @@ public interface ProductRepository extends JpaRepository<Product, UUID> {
     boolean existsBySkuAndIdNot(String sku, UUID id);
 
     Optional<Product> findByIdAndDeletedFalse(UUID id);
+
+    /** Batch lookup for cart rendering — one query instead of one per line. */
+    List<Product> findByIdInAndDeletedFalse(Collection<UUID> ids);
 
     // ── Stock movements ───────────────────────────────────────────────────────
     // Atomic conditional decrement: the `stockQuantity >= :qty` guard makes the

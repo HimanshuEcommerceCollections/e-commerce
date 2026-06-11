@@ -1,6 +1,7 @@
 package com.nexuscommerce.auth.config;
 
 import com.nexuscommerce.auth.filter.JwtAuthenticationFilter;
+import com.nexuscommerce.auth.filter.RateLimitFilter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -33,7 +34,10 @@ import java.util.List;
 public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthFilter;
+    private final RateLimitFilter rateLimitFilter;
     private final UserDetailsService userDetailsService;
+    private final RestAuthenticationEntryPoint authenticationEntryPoint;
+    private final RestAccessDeniedHandler accessDeniedHandler;
 
     /** Comma-separated browser origins allowed to call the API (app.cors.allowed-origins). */
     @Value("${app.cors.allowed-origins}")
@@ -45,7 +49,10 @@ public class SecurityConfig {
         "/api/categories/**",
         // Stripe webhook: no JWT (Stripe sends none); authenticity is verified
         // from the Stripe-Signature header in StripeWebhookService.
-        "/api/payments/stripe/webhook"
+        "/api/payments/stripe/webhook",
+        // Liveness/readiness probes for deploy targets.
+        "/actuator/health/**",
+        "/actuator/health"
     };
 
     @Bean
@@ -67,10 +74,20 @@ public class SecurityConfig {
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
                 )
 
+                // Filter-chain denials in the API's JSON envelope: 401 for
+                // missing/invalid auth (Spring's default commits an empty 403),
+                // 403 for an authenticated caller without the required role.
+                .exceptionHandling(ex -> ex
+                        .authenticationEntryPoint(authenticationEntryPoint)
+                        .accessDeniedHandler(accessDeniedHandler)
+                )
+
                 .authenticationProvider(authenticationProvider())
 
-                // JWT filter runs before the standard username/password filter
+                // JWT filter runs before the standard username/password filter;
+                // the auth-endpoint rate limiter runs before everything.
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(rateLimitFilter, JwtAuthenticationFilter.class)
 
                 .build();
     }

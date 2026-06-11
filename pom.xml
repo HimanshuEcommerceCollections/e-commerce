@@ -41,6 +41,19 @@
 			<artifactId>spring-boot-starter-security</artifactId>
 		</dependency>
 
+		<!-- ─── Health/readiness probes ──────────────────────────────── -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+
+		<!-- ─── Rate limiting (in-memory token buckets) ──────────────── -->
+		<dependency>
+			<groupId>com.bucket4j</groupId>
+			<artifactId>bucket4j_jdk17-core</artifactId>
+			<version>8.14.0</version>
+		</dependency>
+
 		<!-- ─── Persistence ──────────────────────────────────────────── -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -94,6 +107,13 @@
 			<artifactId>stripe-java</artifactId>
 			<version>${stripe.version}</version>
 		</dependency>
+		<!-- stripe-java's Gson is not exposed transitively; needed to re-parse
+		     stored webhook payloads for the admin replay endpoint. Version
+		     managed by the Spring Boot BOM. -->
+		<dependency>
+			<groupId>com.google.code.gson</groupId>
+			<artifactId>gson</artifactId>
+		</dependency>
 
 		<!-- ─── Utilities ────────────────────────────────────────────── -->
 		<dependency>
@@ -118,6 +138,15 @@
 			<artifactId>spring-security-test</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<!-- Embedded real Postgres for integration tests (no Docker required).
+		     Tests must NEVER touch the configured (live) database — the test base
+		     class points the datasource at this embedded instance. -->
+		<dependency>
+			<groupId>io.zonky.test</groupId>
+			<artifactId>embedded-postgres</artifactId>
+			<version>2.0.7</version>
+			<scope>test</scope>
+		</dependency>
 	</dependencies>
 
 	<build>
@@ -132,6 +161,20 @@
 							<artifactId>lombok</artifactId>
 						</exclude>
 					</excludes>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<!-- Integration tests are named *IT but run in the test phase
+					     (embedded Postgres, no external setup) — include them
+					     alongside Surefire's defaults. -->
+					<includes>
+						<include>**/*Test.java</include>
+						<include>**/*Tests.java</include>
+						<include>**/*IT.java</include>
+					</includes>
 				</configuration>
 			</plugin>
 			<plugin>

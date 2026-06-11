@@ -1,0 +1,18 @@
+# ── Test profile ──────────────────────────────────────────────────────────────
+# Tests run against the embedded Postgres from EmbeddedPostgresConfig — NEVER
+# the configured (live) database. The literal values below also override any
+# .env-provided env vars (profile-specific files beat the base profile's
+# ${ENV_VAR:...} placeholders), so a developer's local Stripe keys can't leak
+# real API calls into the test run.
+
+app:
+  jwt:
+    secret: test-only-secret-test-only-secret-0123456789
+  payment:
+    provider: manual
+  rate-limit:
+    enabled: false   # individual tests re-enable with their own limits
+
+logging:
+  level:
+    com.nexuscommerce: INFO

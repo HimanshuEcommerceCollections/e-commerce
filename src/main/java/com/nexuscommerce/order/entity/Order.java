@@ -6,6 +6,7 @@ import jakarta.persistence.*;
 import lombok.*;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -88,6 +89,34 @@ public class Order extends BaseEntity {
      */
     @Column(length = 255)
     private String paymentIntentId;
+
+    /**
+     * Most recent declined/failed payment attempt. A failed attempt is NOT
+     * terminal (the customer can retry the same PaymentIntent), so this is an
+     * audit trail — failure never cancels the order or releases stock.
+     */
+    @Column(name = "last_payment_failure_at")
+    private Instant lastPaymentFailureAt;
+
+    // ── Checkout idempotency ───────────────────────────────────────────────────
+    // Client-supplied Idempotency-Key, unique per user (partial index, V6). The
+    // request hash rejects a key reused with a different request body instead of
+    // silently replaying the original order.
+
+    @Column(name = "idempotency_key", length = 80)
+    private String idempotencyKey;
+
+    @Column(name = "request_hash", length = 64)
+    private String requestHash;
+
+    // ── Cancellation audit ─────────────────────────────────────────────────────
+
+    @Column(name = "cancellation_reason", length = 255)
+    private String cancellationReason;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "cancelled_by", length = 20)
+    private CancellationActor cancelledBy;
 
     // ── Shipping address snapshot ─────────────────────────────────────────────
 

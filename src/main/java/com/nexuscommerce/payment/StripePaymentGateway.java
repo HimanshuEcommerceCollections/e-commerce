@@ -2,15 +2,17 @@ package com.nexuscommerce.payment;
 
 import com.stripe.exception.StripeException;
 import com.stripe.model.PaymentIntent;
+import com.stripe.model.Refund;
 import com.stripe.net.RequestOptions;
 import com.stripe.param.PaymentIntentCreateParams;
+import com.stripe.param.RefundCreateParams;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -30,24 +32,33 @@ import java.util.Set;
 @ConditionalOnProperty(name = "app.payment.provider", havingValue = "stripe")
 public class StripePaymentGateway implements PaymentGateway {
 
-    /**
-     * ISO-4217 currencies that have no minor unit: their amounts are charged as
-     * whole numbers, not multiplied by 100. (Stripe's "zero-decimal" set.)
-     */
-    private static final Set<String> ZERO_DECIMAL_CURRENCIES = Set.of(
-            "BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG",
-            "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF");
+    /** PaymentIntent statuses that mean "too late to cancel — money is moving or moved". */
+    private static final Set<String> NOT_CANCELLABLE_STATUSES = Set.of(
+            "succeeded", "processing", "requires_capture");
 
     private final String secretKey;
+    private final int connectTimeoutMs;
+    private final int readTimeoutMs;
 
-    public StripePaymentGateway(@Value("${app.payment.stripe.secret-key}") String secretKey) {
+    public StripePaymentGateway(
+            @Value("${app.payment.stripe.secret-key}") String secretKey,
+            @Value("${app.payment.stripe.connect-timeout-ms:10000}") int connectTimeoutMs,
+            @Value("${app.payment.stripe.read-timeout-ms:20000}") int readTimeoutMs) {
+        // Fail fast: booting "configured for Stripe" without a usable key would
+        // surface as a 502 on the first checkout instead of at deploy time.
+        if (secretKey == null || secretKey.isBlank() || secretKey.contains("REPLACE")) {
+            throw new IllegalStateException(
+                    "app.payment.provider=stripe requires STRIPE_SECRET_KEY to be set");
+        }
         this.secretKey = secretKey;
+        this.connectTimeoutMs = connectTimeoutMs;
+        this.readTimeoutMs = readTimeoutMs;
     }
 
     @Override
     public PaymentInitiation initiate(PaymentRequest request) {
         PaymentIntentCreateParams params = PaymentIntentCreateParams.builder()
-                .setAmount(toMinorUnits(request.amount(), request.currency()))
+                .setAmount(MoneyUnits.toMinorUnits(request.amount(), request.currency()))
                 .setCurrency(request.currency().toLowerCase())
                 // Lets Stripe present whatever payment methods are enabled on the
                 // account without the client having to enumerate them.
@@ -61,10 +72,7 @@ public class StripePaymentGateway implements PaymentGateway {
 
         // Idempotency key scoped to the order: a retried checkout for the same
         // order reuses the existing PaymentIntent rather than creating a duplicate.
-        RequestOptions options = RequestOptions.builder()
-                .setApiKey(secretKey)
-                .setIdempotencyKey("order-" + request.orderNumber())
-                .build();
+        RequestOptions options = requestOptions("order-" + request.orderNumber());
 
         try {
             PaymentIntent intent = PaymentIntent.create(params, options);
@@ -75,16 +83,95 @@ public class StripePaymentGateway implements PaymentGateway {
         }
     }
 
-    /**
-     * Convert a major-unit amount (e.g. dollars) to the integer minor units Stripe
-     * expects (e.g. cents), honouring zero-decimal currencies. Uses exact
-     * conversion so a fractional cent would surface as an error rather than be
-     * silently rounded away.
-     */
-    private long toMinorUnits(BigDecimal amount, String currency) {
-        BigDecimal scaled = ZERO_DECIMAL_CURRENCIES.contains(currency.toUpperCase())
-                ? amount.setScale(0, RoundingMode.UNNECESSARY)
-                : amount.movePointRight(2).setScale(0, RoundingMode.UNNECESSARY);
-        return scaled.longValueExact();
+    @Override
+    public String refund(String paymentReference, BigDecimal amount, String currency) {
+        RefundCreateParams params = RefundCreateParams.builder()
+                .setPaymentIntent(paymentReference)
+                .setAmount(MoneyUnits.toMinorUnits(amount, currency))
+                .build();
+        // Phase 1 issues at most one (full) refund per intent, so keying on the
+        // intent makes a retried cancel reuse the same refund instead of
+        // double-refunding.
+        RequestOptions options = requestOptions("refund-" + paymentReference);
+
+        try {
+            Refund refundResult = Refund.create(params, options);
+            return refundResult.getId();
+        } catch (StripeException e) {
+            log.error("Stripe refund failed for intent {}", paymentReference, e);
+            throw new PaymentGatewayException("Unable to refund payment", e);
+        }
+    }
+
+    @Override
+    public boolean cancelPayment(String paymentReference) {
+        try {
+            PaymentIntent intent = PaymentIntent.retrieve(paymentReference, requestOptions(null));
+            if ("canceled".equals(intent.getStatus())) {
+                return true;
+            }
+            if (NOT_CANCELLABLE_STATUSES.contains(intent.getStatus())) {
+                return false;
+            }
+            intent.cancel(requestOptions(null));
+            return true;
+        } catch (StripeException e) {
+            // The cancel can race the customer completing payment; re-check before
+            // treating it as a hard failure.
+            String status = currentStatus(paymentReference);
+            if (status != null && NOT_CANCELLABLE_STATUSES.contains(status)) {
+                return false;
+            }
+            if ("canceled".equals(status)) {
+                return true;
+            }
+            log.error("Stripe PaymentIntent cancel failed for intent {}", paymentReference, e);
+            throw new PaymentGatewayException("Unable to cancel payment", e);
+        }
+    }
+
+    @Override
+    public Optional<String> findClientSecret(String paymentReference) {
+        try {
+            return Optional.ofNullable(
+                    PaymentIntent.retrieve(paymentReference, requestOptions(null)).getClientSecret());
+        } catch (StripeException e) {
+            log.error("Stripe PaymentIntent retrieve failed for intent {}", paymentReference, e);
+            throw new PaymentGatewayException("Unable to look up payment", e);
+        }
+    }
+
+    @Override
+    public boolean supportsAutomaticExpiry() {
+        // Abandoned Stripe checkouts hold reserved stock forever unless expired.
+        return true;
+    }
+
+    @Override
+    public boolean supportsManualConfirmation() {
+        // Stripe reports outcomes via webhook; hand-marking would diverge from money.
+        return false;
+    }
+
+    private String currentStatus(String paymentReference) {
+        try {
+            return PaymentIntent.retrieve(paymentReference, requestOptions(null)).getStatus();
+        } catch (StripeException e) {
+            return null;
+        }
+    }
+
+    private RequestOptions requestOptions(String idempotencyKey) {
+        // Tight timeouts: checkout calls Stripe while holding product row locks
+        // (the stock decrement), so the SDK's 80s default read timeout would let
+        // one Stripe latency spike stall every checkout sharing a product.
+        RequestOptions.RequestOptionsBuilder builder = RequestOptions.builder()
+                .setApiKey(secretKey)
+                .setConnectTimeout(connectTimeoutMs)
+                .setReadTimeout(readTimeoutMs);
+        if (idempotencyKey != null) {
+            builder.setIdempotencyKey(idempotencyKey);
+        }
+        return builder.build();
     }
 }

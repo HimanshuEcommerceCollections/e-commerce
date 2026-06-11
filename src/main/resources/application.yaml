@@ -29,7 +29,10 @@ spring:
   # ── JPA / Hibernate ───────────────────────────────────────────────────────
   jpa:
     hibernate:
-      ddl-auto: ${JPA_DDL_AUTO:validate}   # Flyway owns the schema; Hibernate only validates
+      # Flyway owns the schema; Hibernate only validates. Deliberately not
+      # env-overridable — 'update' against a shared database silently drifts
+      # the schema away from the migrations.
+      ddl-auto: validate
     show-sql: false
     open-in-view: false
     properties:
@@ -42,8 +45,10 @@ spring:
 # ── Application-level JWT properties ─────────────────────────────────────────
 app:
   jwt:
-    # Minimum 256-bit (32-char) secret. Override via env var JWT_SECRET in production.
-    secret: ${JWT_SECRET:5468576D5A7134743777217A25432A462D4A614E645267556B58703272357538}
+    # Minimum 256-bit (32-char) secret. REQUIRED — there is intentionally no
+    # default: booting with a publicly-committed signing key would let anyone
+    # mint valid tokens. The app fails fast at startup if JWT_SECRET is unset.
+    secret: ${JWT_SECRET}
     # Access token lifetime in milliseconds (default 24 h)
     expiration: ${JWT_EXPIRATION_MS:86400000}
     # Refresh token lifetime in milliseconds (default 7 days)
@@ -62,6 +67,22 @@ app:
     # ISO-4217 currency code stamped onto every order. Single-currency for now;
     # revisit when multi-currency / per-merchant pricing is introduced.
     currency: ${ORDER_CURRENCY:USD}
+    # Minutes a PENDING_PAYMENT order may hold reserved stock before the expiry
+    # job cancels it and restocks. Only applies when the active gateway supports
+    # automatic expiry (Stripe). Manual-gateway orders legitimately wait for an
+    # admin, so the job ignores them regardless of this value. 0 disables.
+    pending-expiry-minutes: ${ORDER_PENDING_EXPIRY_MINUTES:30}
+    # How often the expiry job scans for stale PENDING_PAYMENT orders.
+    expiry-check-interval-ms: ${ORDER_EXPIRY_CHECK_INTERVAL_MS:60000}
+
+  rate-limit:
+    # In-memory per-IP throttling of the public auth endpoints (login/register
+    # are otherwise unbounded brute-force targets). Sized for a single instance;
+    # revisit with a shared store when scaling out.
+    enabled: ${RATE_LIMIT_ENABLED:true}
+    auth:
+      capacity: ${RATE_LIMIT_AUTH_CAPACITY:10}
+      refill-per-minute: ${RATE_LIMIT_AUTH_REFILL_PER_MINUTE:10}
 
   payment:
     # Active payment gateway: 'manual' (default — orders rest in PENDING_PAYMENT
@@ -79,6 +100,17 @@ server:
   error:
     include-message: always
     include-binding-errors: always
+
+# ── Actuator (health/readiness probes) ───────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging:

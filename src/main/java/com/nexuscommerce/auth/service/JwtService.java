@@ -7,6 +7,7 @@ import io.jsonwebtoken.MalformedJwtException;
 import io.jsonwebtoken.UnsupportedJwtException;
 import io.jsonwebtoken.security.Keys;
 import io.jsonwebtoken.security.SignatureException;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Service;
@@ -33,6 +34,17 @@ public class JwtService {
 
     @Value("${app.jwt.expiration}")
     private long expirationMs;
+
+    private SecretKey signingKey;
+
+    /**
+     * Build the key once at startup: a too-short secret then fails the boot with
+     * jjwt's WeakKeyException instead of turning every login into an opaque 500.
+     */
+    @PostConstruct
+    void initSigningKey() {
+        this.signingKey = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+    }
 
     // ── Token generation ─────────────────────────────────────────────────────
 
@@ -111,7 +123,7 @@ public class JwtService {
     // ── Key ──────────────────────────────────────────────────────────────────
 
     private SecretKey signingKey() {
-        return Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+        return signingKey;
     }
 
     public long getExpirationMs() {
