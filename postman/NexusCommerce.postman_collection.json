@@ -1,0 +1,1349 @@
+{
+  "info": {
+    "_postman_id": "6f1c2a8e-4b1d-4c55-9a7e-1f3e0c2b9d10",
+    "name": "NexusCommerce API",
+    "description": "REST API for the General Store MVP backend (`ecom-server`, Spring Boot 3.5).\n\n## Quick start\n1. Start the stack: `docker compose up --build` in `ecom-server/` (API on `http://localhost:8080`).\n2. Import this collection and `NexusCommerce.local.postman_environment.json`, then select the **NexusCommerce – Local** environment.\n3. Run **Auth → Register customer**, then **Auth → Login as customer**. The login test script stores the JWT in `customerToken`.\n4. The create requests store their ids (`categoryId`, `productId`, `addressId`, `orderId`) automatically, so the folders can be run top to bottom.\n\n## Roles\nPublic registration always creates `ROLE_CUSTOMER`. There is no API for creating merchants or admins. To get one, register a normal user, then promote it in the database:\n\n```sql\nUPDATE users SET role = 'ROLE_MERCHANT' WHERE email = 'merchant@example.com';\nUPDATE users SET role = 'ROLE_ADMIN'    WHERE email = 'admin@example.com';\n```\n\nWith Docker: `docker compose exec db psql -U postgres -d nexus_commerce -c \"<sql>\"`. The change takes effect on the next request, because the role is read from the database each time.\n\n| Role | Can call |\n|---|---|\n| Public | auth, product and category reads, health |\n| CUSTOMER | cart, addresses, checkout, own orders |\n| MERCHANT | create, update and delete own products, list own products, catalog import |\n| ADMIN | create categories, catalog import, mark orders paid, replay Stripe webhook events |\n\n## Response envelope\nEvery response uses the same shape:\n```json\n{ \"success\": true, \"message\": \"...\", \"data\": { }, \"timestamp\": \"2026-09-24T10:00:00Z\" }\n```\nOn errors, `success` is `false` and `data` may hold field-level validation details. List endpoints return a Spring `Page` in `data` (`content`, `totalElements`, `totalPages`, `number`, `size`) and accept `page`, `size` and `sort` query parameters.\n\n## Products and variants (FR-IM-02)\nA **parent product** is the catalog record: code, name, brand, descriptions and category. Each purchasable **variant** is its own SKU with its own price, stock, images and attributes (variant name, colour, size, material, pattern, style). Cart and checkout work with variant ids. `/api/products/{id}` returns one variant together with its `parent` and a `variants` list for the variant selector. A product without variants is a parent with one SKU; its parent code defaults to the SKU.\n\n## Catalog import (FR-IM-01)\n`POST /api/catalog/import` loads a CSV or Excel (.xlsx) file in the template format. Download the template from **Catalog Import → Download template**. `postman/catalog-import-sample.csv` is a ready-made example.\n\n- Mandatory per row: `SKU_ID`, `Product_Name`, `Category` (an existing category's slug or name), `Product_Status` (`DRAFT`, `ACTIVE`, `INACTIVE` or `ARCHIVED`), `Selling_Price`, `Inventory_Qty`, and at least one of `Image_1_URL` … `Image_5_URL`.\n- Rows sharing a `Parent_Product_ID` become variants of one parent and must share a category.\n- A bad row is rejected on its own; the valid rows still import. The report lists each rejected row's number, SKU and reason.\n- A SKU that repeats within the file, or already exists in the catalog, is rejected. Re-import as an update (FR-IM-09) is not built yet.\n- Other template columns (MRP, Tax_Code, SEO fields and so on) are accepted but not stored yet, and are listed in `ignoredColumns`.\n- Limits: 10 MB per file and 5,000 data rows (`CATALOG_IMPORT_MAX_FILE_SIZE`, `CATALOG_IMPORT_MAX_ROWS`).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{customerToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('Response uses the ApiResponse envelope', function () {",
+          "    if (pm.request.url.getPath().startsWith('/actuator')) return;",
+          "    if (!pm.response.headers.get('Content-Type') || !pm.response.headers.get('Content-Type').includes('json')) return;",
+          "    const body = pm.response.json();",
+          "    pm.expect(body).to.have.property('success');",
+          "});"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "auth": {
+        "type": "noauth"
+      },
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            },
+            "description": "Overall health. Public. Returns `{\"status\":\"UP\"}` when the app and database are reachable. The response does not use the ApiResponse envelope."
+          },
+          "response": []
+        },
+        {
+          "name": "Readiness probe",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health/readiness",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "actuator",
+                "health",
+                "readiness"
+              ]
+            },
+            "description": "Kubernetes-style readiness probe. The Docker HEALTHCHECK uses it."
+          },
+          "response": []
+        },
+        {
+          "name": "Liveness probe",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/actuator/health/liveness",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "actuator",
+                "health",
+                "liveness"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "description": "Public. Both endpoints are rate-limited per client IP (default 10 requests, refilling 10 per minute). Over the limit they return `429`.",
+      "auth": {
+        "type": "noauth"
+      },
+      "item": [
+        {
+          "name": "Register customer",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const data = pm.response.json().data;",
+                  "if (data && data.accessToken) pm.collectionVariables.set('customerToken', data.accessToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{customerEmail}}\",\n  \"password\": \"{{customerPassword}}\",\n  \"fullName\": \"Jane Customer\",\n  \"phoneNumber\": \"+91 98765 43210\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "register"
+              ]
+            },
+            "description": "Creates a `ROLE_CUSTOMER` account and returns a token straight away.\n\n| Field | Rules |\n|---|---|\n| email | required, valid email, ≤255 |\n| password | required, 8–100 chars |\n| fullName | required, ≤200 |\n| phoneNumber | required, `^[+]?[0-9 ()-]{7,20}$` |\n\nErrors: `400` validation, `409` email or phone already registered, `429` rate limited."
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/auth/register",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "auth",
+                    "register"
+                  ]
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Account registered successfully\",\n  \"data\": {\n    \"accessToken\": \"eyJhbGciOiJIUzI1NiJ9...\",\n    \"tokenType\": \"Bearer\",\n    \"expiresIn\": 86400000,\n    \"userId\": \"3f9a1c2e-0b7d-4e7a-9d0a-2b1c3d4e5f60\",\n    \"email\": \"customer@example.com\",\n    \"fullName\": \"Jane Customer\",\n    \"phoneNumber\": \"+91 98765 43210\",\n    \"role\": \"ROLE_CUSTOMER\",\n    \"issuedAt\": \"2026-09-24T10:00:00Z\"\n  },\n  \"timestamp\": \"2026-09-24T10:00:00Z\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Login as customer",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('customerToken', pm.response.json().data.accessToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{customerEmail}}\",\n  \"password\": \"{{customerPassword}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Stores the JWT in `customerToken`. Errors: `400` validation, `401` bad credentials, `429` rate limited."
+          },
+          "response": []
+        },
+        {
+          "name": "Login as merchant",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Role is ROLE_MERCHANT', () => pm.expect(data.role).to.eql('ROLE_MERCHANT'));",
+                  "pm.collectionVariables.set('merchantToken', data.accessToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{merchantEmail}}\",\n  \"password\": \"{{merchantPassword}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Stores the JWT in `merchantToken`. The account must have been promoted to `ROLE_MERCHANT` in the database (see the collection description)."
+          },
+          "response": []
+        },
+        {
+          "name": "Login as admin",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Role is ROLE_ADMIN', () => pm.expect(data.role).to.eql('ROLE_ADMIN'));",
+                  "pm.collectionVariables.set('adminToken', data.accessToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "Stores the JWT in `adminToken`. The account must have been promoted to `ROLE_ADMIN` in the database."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Categories",
+      "item": [
+        {
+          "name": "List categories",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/categories",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "categories"
+              ]
+            },
+            "description": "Public. Returns every category as a flat list. There is no subcategory hierarchy yet."
+          },
+          "response": []
+        },
+        {
+          "name": "Get category",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/categories/{{categoryId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "categories",
+                "{{categoryId}}"
+              ]
+            },
+            "description": "Public. `404` if the category does not exist."
+          },
+          "response": []
+        },
+        {
+          "name": "Create category (admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('categoryId', pm.response.json().data.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Clothing\",\n  \"slug\": \"clothing-{{$timestamp}}\",\n  \"description\": \"Apparel for men, women and kids\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/categories",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "categories"
+              ]
+            },
+            "description": "Requires `ROLE_ADMIN`. Stores the new id in `categoryId`.\n\n| Field | Rules |\n|---|---|\n| name | required, ≤100 |\n| slug | required, ≤120, unique |\n| description | optional, ≤500 |\n\nErrors: `400` validation, `401` no token, `403` not an admin, `409` slug already exists."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Products",
+      "item": [
+        {
+          "name": "List active products",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/products?page=0&size=20&sort=createdAt,desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "products"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "0",
+                  "description": "Zero-based page index"
+                },
+                {
+                  "key": "size",
+                  "value": "20",
+                  "description": "Page size (default 20)"
+                },
+                {
+                  "key": "sort",
+                  "value": "createdAt,desc",
+                  "description": "`field,asc|desc`, for example `price,asc`"
+                }
+              ]
+            },
+            "description": "Public. Paginated list of `ACTIVE` variant SKUs. Each item includes `parentId`, `parentCode`, `brand`, `variantName`, `color` and `size`, so a storefront can group variants by parent. Search, filters (brand, price, size, colour, availability) and relevance or popularity sort (FR-ST-04/05/08) are not implemented yet."
+          },
+          "response": []
+        },
+        {
+          "name": "List products by category",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/products/category/{{categoryId}}?page=0&size=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "products",
+                "category",
+                "{{categoryId}}"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "0"
+                },
+                {
+                  "key": "size",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Public. Paginated products in one category."
+          },
+          "response": []
+        },
+        {
+          "name": "Get product",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/products/{{productId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "products",
+                "{{productId}}"
+              ]
+            },
+            "description": "Public. Returns one variant SKU with its `parent` (`id`, `code`, `name`, `brand`, `shortDescription`, `description`) and `variants`, all live SKUs of the same parent including this one. Each variant has `id`, `sku`, variant attributes, `price`, `stockQuantity`, `status` and `primaryImageUrl`.\n\nAnyone can see `ACTIVE` variants. The owning merchant and admins also see non-active ones, both the requested SKU and its siblings. Send a bearer token to be recognised as the owner or an admin. `404` otherwise."
+          },
+          "response": []
+        },
+        {
+          "name": "List my products (merchant)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{merchantToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/products/my?page=0&size=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "products",
+                "my"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "0"
+                },
+                {
+                  "key": "size",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Requires `ROLE_MERCHANT`. Lists the caller's products in every status."
+          },
+          "response": []
+        },
+        {
+          "name": "Create product (merchant)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('productId', pm.response.json().data.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{merchantToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Men's Cotton Crew T-Shirt\",\n  \"description\": \"Soft 100% cotton crew neck tee.\",\n  \"price\": 499.00,\n  \"stockQuantity\": 50,\n  \"sku\": \"GS-CL-MEN-{{$timestamp}}-BLK-M\",\n  \"categoryId\": \"{{categoryId}}\",\n  \"parentProductCode\": \"{{parentProductCode}}\",\n  \"brand\": \"Nexus Basics\",\n  \"variantName\": \"Black / M\",\n  \"color\": \"Black\",\n  \"size\": \"M\",\n  \"material\": \"Cotton\",\n  \"pattern\": \"Solid\",\n  \"style\": \"Casual\",\n  \"images\": [\n    {\n      \"url\": \"https://cdn.yourstore.com/products/GS-CL-MEN-001-BLK-01.jpg\",\n      \"altText\": \"Front view\",\n      \"primary\": true\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/products",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "products"
+              ]
+            },
+            "description": "Requires `ROLE_MERCHANT`. Creates one variant SKU in `DRAFT` status and stores its id in `productId`.\n\n**Parent product:** `parentProductCode` groups variants. If you send a code that already exists, the SKU is added to that parent. A new code, or no code (it then defaults to the SKU), creates the parent from this request's `name`, `brand`, `description` and `categoryId`. Send the same `parentProductCode` again with a different `sku` to add another variant.\n\n| Field | Rules |\n|---|---|\n| name | required, ≤255 |\n| description | optional, ≤5000 |\n| price | required, > 0 |\n| stockQuantity | required, ≥ 0 |\n| sku | required, ≤100, unique |\n| categoryId | optional UUID. Must match an existing parent's category |\n| parentProductCode | optional, ≤100, letters, digits, `.`, `_`, `-` |\n| brand | optional, ≤100. Used only when the parent is created |\n| variantName | optional, ≤150 |\n| color, size | optional, ≤50 |\n| material, pattern, style | optional, ≤100 |\n| images | optional, ≤10 items; each needs `url` (≤2048). Optional: `altText`, `primary`, `width`, `height`, `contentType`, `fileSizeBytes`, `storageKey` |\n\nErrors: `400` validation or category differs from the parent's, `403` not a merchant, `404` unknown category or parent code owned by someone else, `409` SKU already exists."
+          },
+          "response": []
+        },
+        {
+          "name": "Update product (merchant)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{merchantToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"price\": 449.00,\n  \"stockQuantity\": 40,\n  \"status\": \"ACTIVE\",\n  \"color\": \"Jet Black\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/products/{{productId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "products",
+                "{{productId}}"
+              ]
+            },
+            "description": "Requires `ROLE_MERCHANT` and ownership of the product. Partial update: omitted fields keep their current value. Fields: `name`, `description`, `price`, `stockQuantity`, `sku`, `status` (`DRAFT` | `ACTIVE` | `INACTIVE` | `ARCHIVED`), `categoryId`, `images`, `variantName`, `color`, `size`, `material`, `pattern`, `style`.\n\n`categoryId` belongs to the parent, so changing it moves every variant of the parent. Publish or unpublish by setting `status` to `ACTIVE` or `INACTIVE`, one variant at a time."
+          },
+          "response": []
+        },
+        {
+          "name": "Delete product (merchant)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{merchantToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/products/{{productId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "products",
+                "{{productId}}"
+              ]
+            },
+            "description": "Requires `ROLE_MERCHANT` and ownership. Soft-deletes the variant SKU. Deleting a parent's last variant also removes the parent."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Catalog Import",
+      "description": "Bulk catalog import (FR-IM-01/02). Requires `ROLE_MERCHANT` or `ROLE_ADMIN`; uses `merchantToken`. Imported products are owned by the caller. See the collection description for the column rules.",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          {
+            "key": "token",
+            "value": "{{merchantToken}}",
+            "type": "string"
+          }
+        ]
+      },
+      "item": [
+        {
+          "name": "Download template",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('CSV attachment', () => pm.expect(pm.response.headers.get('Content-Disposition')).to.include('catalog-import-template.csv'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/catalog/import/template",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "catalog",
+                "import",
+                "template"
+              ]
+            },
+            "description": "Downloads `catalog-import-template.csv`: every column the importer reads, plus two example rows (one parent with two variants). Use **Send and Download** to save it. The response is raw CSV, not the ApiResponse envelope."
+          },
+          "response": []
+        },
+        {
+          "name": "Import catalog file",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const report = pm.response.json().data;",
+                  "pm.test('Report totals add up', () => pm.expect(report.importedRows + report.failedRows).to.eql(report.totalRows));",
+                  "console.log('Import report', report);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "catalog-import-sample.csv",
+                  "description": "A .csv (UTF-8) or .xlsx file. Only the first sheet of a workbook is read."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/catalog/import",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "catalog",
+                "import"
+              ]
+            },
+            "description": "Uploads a template file as `multipart/form-data`, in a part named `file`. Re-select the file after importing the collection: Postman stores only its name. The sample is `postman/catalog-import-sample.csv`. Its rows use category slug `clothing`, so create that category first (or edit the file). Row 5 fails on purpose to show the error report.\n\nReturns `200` with a report even when some rows are rejected:\n\n| Field | Meaning |\n|---|---|\n| totalRows | data rows read (blank rows skipped) |\n| importedRows / failedRows | rows written / rejected |\n| parentProductsCreated | new parent products |\n| ignoredColumns | columns in the file the importer doesn't read yet |\n| errors[] | `row` (as numbered in the file, header = 1), `sku`, `reason` (all problems, joined with `; `) |\n\nErrors for the whole file: `400` wrong file type, unreadable file, missing required columns, no data rows or too many rows; `400` no `file` part; `403` not a merchant or admin; `413` file too large; `409` another request inserted the same SKU mid-import (nothing is written)."
+          },
+          "response": [
+            {
+              "name": "200 Partial import",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/catalog/import",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "catalog",
+                    "import"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Imported 3 of 4 rows\",\n  \"data\": {\n    \"fileName\": \"catalog-import-sample.csv\",\n    \"totalRows\": 4,\n    \"importedRows\": 3,\n    \"failedRows\": 1,\n    \"parentProductsCreated\": 2,\n    \"ignoredColumns\": [],\n    \"errors\": [\n      {\n        \"row\": 5,\n        \"sku\": \"GS-CL-MEN-003\",\n        \"reason\": \"Unknown category 'no-such-category'; Selling_Price is required\"\n      }\n    ]\n  },\n  \"timestamp\": \"2026-09-24T10:00:00Z\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Addresses",
+      "description": "Requires an authenticated user. Uses `customerToken`. A user can have at most 5 addresses by default (`USER_ADDRESS_MAX_PER_USER`).",
+      "item": [
+        {
+          "name": "Create address",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('addressId', pm.response.json().data.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"Home\",\n  \"recipientName\": \"Jane Customer\",\n  \"phone\": \"+91 98765 43210\",\n  \"addressLine1\": \"221B MG Road\",\n  \"addressLine2\": \"Flat 4\",\n  \"city\": \"Bengaluru\",\n  \"state\": \"Karnataka\",\n  \"postalCode\": \"560001\",\n  \"country\": \"India\",\n  \"isDefault\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/users/me/addresses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "users",
+                "me",
+                "addresses"
+              ]
+            },
+            "description": "Stores the new id in `addressId`.\n\nRequired: `label` (≤50), `recipientName` (≤200), `addressLine1` (≤255), `city`, `state` (≤100), `postalCode` (≤20), `country` (≤100). Optional: `phone`, `addressLine2`, `isDefault`.\n\nErrors: `400` validation or address limit reached."
+          },
+          "response": []
+        },
+        {
+          "name": "List addresses",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/users/me/addresses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "users",
+                "me",
+                "addresses"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get address",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/users/me/addresses/{{addressId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "users",
+                "me",
+                "addresses",
+                "{{addressId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update address",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"Office\",\n  \"recipientName\": \"Jane Customer\",\n  \"phone\": \"+91 98765 43210\",\n  \"addressLine1\": \"1 Residency Road\",\n  \"addressLine2\": \"\",\n  \"city\": \"Bengaluru\",\n  \"state\": \"Karnataka\",\n  \"postalCode\": \"560025\",\n  \"country\": \"India\",\n  \"isDefault\": false\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/users/me/addresses/{{addressId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "users",
+                "me",
+                "addresses",
+                "{{addressId}}"
+              ]
+            },
+            "description": "Full replace. Every required field must be sent."
+          },
+          "response": []
+        },
+        {
+          "name": "Set default address",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/users/me/addresses/{{addressId}}/default",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "users",
+                "me",
+                "addresses",
+                "{{addressId}}",
+                "default"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete address",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/users/me/addresses/{{addressId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "users",
+                "me",
+                "addresses",
+                "{{addressId}}"
+              ]
+            },
+            "description": "Run this last: checkout needs `addressId`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Cart",
+      "description": "Requires `ROLE_CUSTOMER` (`customerToken`). Items are keyed by `productId`.",
+      "item": [
+        {
+          "name": "Get cart",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/cart",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "cart"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Add item",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"productId\": \"{{productId}}\",\n  \"quantity\": 2\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/cart/items",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "cart",
+                "items"
+              ]
+            },
+            "description": "`quantity` must be 1–999. The product must be `ACTIVE`. Errors: `400` validation, product not active or insufficient stock; `404` product not found."
+          },
+          "response": []
+        },
+        {
+          "name": "Update item quantity",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 3\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/cart/items/{{productId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "cart",
+                "items",
+                "{{productId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Remove item",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/cart/items/{{productId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "cart",
+                "items",
+                "{{productId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Clear cart",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/cart",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "cart"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Orders",
+      "description": "Customer endpoints use `customerToken`. `Mark order paid` uses `adminToken`.",
+      "item": [
+        {
+          "name": "Checkout (place order)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const data = pm.response.json().data;",
+                  "const order = data.order || data;",
+                  "if (order && order.id) pm.collectionVariables.set('orderId', order.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}",
+                "description": "Optional. Sending the same key again returns the original order instead of creating a second one. Reusing a key with a different request returns `422`."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"addressId\": \"{{addressId}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders"
+              ]
+            },
+            "description": "Turns the caller's cart into an order, reserves stock and starts payment with the active gateway.\n\n- `manual` gateway: the order waits in `PENDING_PAYMENT` until an admin calls **Mark order paid**.\n- `stripe` gateway: the response includes the PaymentIntent client secret for Stripe Elements. The webhook confirms payment, and unpaid orders expire after `ORDER_PENDING_EXPIRY_MINUTES`.\n\nErrors: `400` validation, invalid idempotency key or empty cart; `404` address not found; `409` out of stock or product unavailable; `422` idempotency key reused with a different request; `502` payment gateway error."
+          },
+          "response": []
+        },
+        {
+          "name": "List my orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders?page=0&size=20&sort=createdAt,desc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "0"
+                },
+                {
+                  "key": "size",
+                  "value": "20"
+                },
+                {
+                  "key": "sort",
+                  "value": "createdAt,desc"
+                }
+              ]
+            },
+            "description": "Paginated order summaries without line items."
+          },
+          "response": []
+        },
+        {
+          "name": "Get my order",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{orderId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Full order with items and shipping address. `404` if it is not the caller's order."
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel my order",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{orderId}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{orderId}}",
+                "cancel"
+              ]
+            },
+            "description": "Cancels the order and restocks its items. `409` if the order is in a state that can't be cancelled."
+          },
+          "response": []
+        },
+        {
+          "name": "Mark order paid (admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/{{orderId}}/pay",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "orders",
+                "{{orderId}}",
+                "pay"
+              ]
+            },
+            "description": "Requires `ROLE_ADMIN`. Moves a `PENDING_PAYMENT` order to `PAID`. Used with the `manual` payment gateway."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Payments (Stripe)",
+      "description": "These endpoints exist only when `PAYMENT_PROVIDER=stripe`. Otherwise they return `404`.",
+      "item": [
+        {
+          "name": "Stripe webhook",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Stripe-Signature",
+                "value": "t=0,v1=replace_me",
+                "description": "Required. Stripe computes this over the raw body. Postman can't generate a valid one."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"evt_test\",\n  \"type\": \"payment_intent.succeeded\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/payments/stripe/webhook",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "payments",
+                "stripe",
+                "webhook"
+              ]
+            },
+            "description": "Public. Stripe calls it; authenticity comes from the signature. This request documents the contract only and returns `400` because its signature is fake. To test for real, run `stripe listen --forward-to localhost:8080/api/payments/stripe/webhook` and `stripe trigger payment_intent.succeeded`."
+          },
+          "response": []
+        },
+        {
+          "name": "Replay webhook event (admin)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/payments/stripe/webhook-events/{{webhookEventId}}/replay",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "payments",
+                "stripe",
+                "webhook-events",
+                "{{webhookEventId}}",
+                "replay"
+              ]
+            },
+            "description": "Requires `ROLE_ADMIN`. Re-dispatches a stored `FAILED` webhook event (`evt_…`) from the `webhook_events` table. Errors: `404` unknown event, `409` event not replayable."
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "customerToken",
+      "value": ""
+    },
+    {
+      "key": "merchantToken",
+      "value": ""
+    },
+    {
+      "key": "adminToken",
+      "value": ""
+    },
+    {
+      "key": "categoryId",
+      "value": ""
+    },
+    {
+      "key": "parentProductCode",
+      "value": "GS-CL-MEN-001"
+    },
+    {
+      "key": "productId",
+      "value": ""
+    },
+    {
+      "key": "addressId",
+      "value": ""
+    },
+    {
+      "key": "orderId",
+      "value": ""
+    },
+    {
+      "key": "webhookEventId",
+      "value": "evt_replace_me"
+    }
+  ]
+}
