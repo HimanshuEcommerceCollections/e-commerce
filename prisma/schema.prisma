@@ -1,0 +1,259 @@
+// NexusCommerce schema — identical to the Java server's Flyway V1–V10 schema.
+//
+// prisma/migrations/0_init is those Flyway scripts verbatim, so a fresh database
+// ends up exactly where the Java server leaves one. Things Prisma can't express
+// live only in that SQL and must never be dropped by a later migration:
+//   * partial unique indexes: uniq_user_addresses_default, uniq_product_images_primary,
+//     uniq_orders_user_idempotency_key, uniq_carts_user_live, uniq_cart_items_cart_product_live
+//   * CHECK chk_products_stock_non_negative
+// Review every generated migration for DROP INDEX / DROP CONSTRAINT on these.
+//
+// Status-like columns are varchar, not Postgres enums (as in the Java schema);
+// their allowed values are TypeScript unions in src/common/enums.ts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String    @id @default(uuid()) @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted          Boolean   @default(false)
+  email            String    @unique(map: "uk_users_email") @db.VarChar(255)
+  password         String    @db.VarChar(255)
+  role             String    @db.VarChar(20)
+  enabled          Boolean   @default(true)
+  accountNonLocked Boolean   @default(true) @map("account_non_locked")
+  lastLoginAt      DateTime? @map("last_login_at") @db.Timestamptz(6)
+  fullName         String    @map("full_name") @db.VarChar(200)
+  phoneNumber      String?   @unique(map: "uk_users_phone") @map("phone_number") @db.VarChar(20)
+
+  carts     Cart[]
+  addresses UserAddress[]
+  orders    Order[]
+
+  @@map("users")
+}
+
+model ProductCategory {
+  id          String   @id @default(uuid()) @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted     Boolean  @default(false)
+  name        String   @db.VarChar(100)
+  slug        String   @unique(map: "uk_product_categories_slug") @db.VarChar(120)
+  description String?  @db.VarChar(500)
+
+  products       Product[]
+  parentProducts ParentProduct[]
+
+  @@map("product_categories")
+}
+
+/// The catalog record customers browse (FR-IM-02); purchasable variants are Product rows.
+model ParentProduct {
+  id               String           @id @default(uuid()) @db.Uuid
+  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted          Boolean          @default(false)
+  code             String           @unique(map: "uk_parent_products_code") @db.VarChar(100)
+  name             String           @db.VarChar(255)
+  brand            String?          @db.VarChar(100)
+  shortDescription String?          @map("short_description") @db.VarChar(1000)
+  description      String?
+  categoryId       String?          @map("category_id") @db.Uuid
+  merchantId       String           @map("merchant_id") @db.Uuid
+  category         ProductCategory? @relation(fields: [categoryId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_parent_products_category")
+
+  variants Product[]
+
+  @@index([categoryId], map: "idx_parent_products_category_id")
+  @@map("parent_products")
+}
+
+/// One purchasable variant SKU.
+model Product {
+  id            String           @id @default(uuid()) @db.Uuid
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted       Boolean          @default(false)
+  name          String           @db.VarChar(255)
+  description   String?
+  price         Decimal          @db.Decimal(12, 2)
+  stockQuantity Int              @map("stock_quantity")
+  sku           String           @unique(map: "uk_products_sku") @db.VarChar(100)
+  status        String           @db.VarChar(20)
+  categoryId    String?          @map("category_id") @db.Uuid
+  merchantId    String           @map("merchant_id") @db.Uuid
+  /// Optimistic-lock counter (was JPA @Version).
+  version       BigInt?
+  parentId      String           @map("parent_id") @db.Uuid
+  variantName   String?          @map("variant_name") @db.VarChar(150)
+  color         String?          @db.VarChar(50)
+  size          String?          @db.VarChar(50)
+  material      String?          @db.VarChar(100)
+  pattern       String?          @db.VarChar(100)
+  style         String?          @db.VarChar(100)
+  category      ProductCategory? @relation(fields: [categoryId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_products_category")
+  parent        ParentProduct    @relation(fields: [parentId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_products_parent")
+
+  images    ProductImage[]
+  cartItems CartItem[]
+
+  @@index([parentId], map: "idx_products_parent_id")
+  @@map("products")
+}
+
+model ProductImage {
+  id            String   @id @default(uuid()) @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted       Boolean  @default(false)
+  productId     String   @map("product_id") @db.Uuid
+  url           String   @db.VarChar(2048)
+  altText       String?  @map("alt_text") @db.VarChar(255)
+  position      Int
+  isPrimary     Boolean  @default(false) @map("is_primary")
+  width         Int?
+  height        Int?
+  contentType   String?  @map("content_type") @db.VarChar(100)
+  fileSizeBytes BigInt?  @map("file_size_bytes")
+  storageKey    String?  @map("storage_key") @db.VarChar(512)
+  product       Product  @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_images_product")
+
+  @@index([productId], map: "idx_product_images_product_id")
+  @@map("product_images")
+}
+
+model Cart {
+  id        String   @id @default(uuid()) @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted   Boolean  @default(false)
+  userId    String   @map("user_id") @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_carts_user")
+
+  items CartItem[]
+
+  @@index([userId, deleted], map: "idx_carts_user_id")
+  @@map("carts")
+}
+
+model CartItem {
+  id        String   @id @default(uuid()) @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted   Boolean  @default(false)
+  cartId    String   @map("cart_id") @db.Uuid
+  productId String   @map("product_id") @db.Uuid
+  quantity  Int
+  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_cart_items_cart")
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_cart_items_product")
+
+  @@index([cartId, deleted], map: "idx_cart_items_cart_id")
+  @@map("cart_items")
+}
+
+model UserAddress {
+  id            String   @id @default(uuid()) @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted       Boolean  @default(false)
+  userId        String   @map("user_id") @db.Uuid
+  label         String   @db.VarChar(50)
+  recipientName String   @map("recipient_name") @db.VarChar(200)
+  phone         String?  @db.VarChar(20)
+  addressLine1  String   @map("address_line1") @db.VarChar(255)
+  addressLine2  String?  @map("address_line2") @db.VarChar(255)
+  city          String   @db.VarChar(100)
+  state         String   @db.VarChar(100)
+  postalCode    String   @map("postal_code") @db.VarChar(20)
+  country       String   @db.VarChar(100)
+  isDefault     Boolean  @default(false) @map("is_default")
+  user          User     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_user_addresses_user")
+
+  @@index([userId, deleted], map: "idx_user_addresses_user_id")
+  @@map("user_addresses")
+}
+
+/// A placed order — a self-contained historical record (prices, names, address snapshotted).
+model Order {
+  id                   String    @id @default(uuid()) @db.Uuid
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted              Boolean   @default(false)
+  userId               String    @map("user_id") @db.Uuid
+  orderNumber          String    @unique(map: "uk_orders_order_number") @map("order_number") @db.VarChar(40)
+  status               String    @db.VarChar(30)
+  currency             String    @db.VarChar(3)
+  subtotal             Decimal   @db.Decimal(12, 2)
+  taxTotal             Decimal   @map("tax_total") @db.Decimal(12, 2)
+  shippingTotal        Decimal   @map("shipping_total") @db.Decimal(12, 2)
+  discountTotal        Decimal   @map("discount_total") @db.Decimal(12, 2)
+  grandTotal           Decimal   @map("grand_total") @db.Decimal(12, 2)
+  paymentStatus        String?   @map("payment_status") @db.VarChar(20)
+  paymentReference     String?   @map("payment_reference") @db.VarChar(255)
+  paymentIntentId      String?   @map("payment_intent_id") @db.VarChar(255)
+  shipRecipientName    String    @map("ship_recipient_name") @db.VarChar(200)
+  shipPhone            String?   @map("ship_phone") @db.VarChar(20)
+  shipAddressLine1     String    @map("ship_address_line1") @db.VarChar(255)
+  shipAddressLine2     String?   @map("ship_address_line2") @db.VarChar(255)
+  shipCity             String    @map("ship_city") @db.VarChar(100)
+  shipState            String    @map("ship_state") @db.VarChar(100)
+  shipPostalCode       String    @map("ship_postal_code") @db.VarChar(20)
+  shipCountry          String    @map("ship_country") @db.VarChar(100)
+  idempotencyKey       String?   @map("idempotency_key") @db.VarChar(80)
+  requestHash          String?   @map("request_hash") @db.VarChar(64)
+  cancellationReason   String?   @map("cancellation_reason") @db.VarChar(255)
+  cancelledBy          String?   @map("cancelled_by") @db.VarChar(20)
+  lastPaymentFailureAt DateTime? @map("last_payment_failure_at") @db.Timestamptz(6)
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_orders_user")
+
+  items OrderItem[]
+
+  @@index([userId, deleted], map: "idx_orders_user_id")
+  @@index([paymentIntentId], map: "idx_orders_payment_intent_id")
+  @@index([status, createdAt], map: "idx_orders_status_created_at")
+  @@map("orders")
+}
+
+/// Order line; product fields are snapshots, deliberately without FKs to products/users.
+model OrderItem {
+  id          String   @id @default(uuid()) @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted     Boolean  @default(false)
+  orderId     String   @map("order_id") @db.Uuid
+  productId   String   @map("product_id") @db.Uuid
+  merchantId  String   @map("merchant_id") @db.Uuid
+  productName String   @map("product_name") @db.VarChar(255)
+  sku         String   @db.VarChar(100)
+  unitPrice   Decimal  @map("unit_price") @db.Decimal(12, 2)
+  quantity    Int
+  lineTotal   Decimal  @map("line_total") @db.Decimal(12, 2)
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_items_order")
+
+  @@index([orderId], map: "idx_order_items_order_id")
+  @@index([merchantId, deleted], map: "idx_order_items_merchant_id")
+  @@map("order_items")
+}
+
+/// Durable payment-provider webhook event, keyed by the provider's event id.
+model WebhookEvent {
+  eventId      String    @id @map("event_id") @db.VarChar(255)
+  eventType    String?   @map("event_type") @db.VarChar(100)
+  payload      String?
+  status       String    @db.VarChar(20)
+  errorMessage String?   @map("error_message") @db.VarChar(1000)
+  receivedAt   DateTime  @map("received_at") @db.Timestamptz(6)
+  processedAt  DateTime? @map("processed_at") @db.Timestamptz(6)
+
+  @@index([status], map: "idx_webhook_events_status")
+  @@map("webhook_events")
+}
