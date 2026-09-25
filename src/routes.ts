@@ -1,12 +1,22 @@
 import express, { Router } from 'express';
 import multer from 'multer';
+import {
+  ADMIN_INVENTORY_SORTS,
+  ADMIN_ORDER_SORTS,
+  ADMIN_PRODUCT_SORTS,
+  BulkStatusSchema,
+  ParentUpdateSchema,
+  StockAdjustmentSchema,
+  VariantUpdateSchema,
+} from './admin/admin.service';
 import { assertRole, currentUser, requireAuth, requireRole } from './auth/auth.middleware';
 import { LoginSchema, RegisterSchema } from './auth/auth.service';
 import { CartItemSchema, CartItemUpdateSchema } from './cart/cart.service';
 import { created, noContent, ok } from './common/api-response';
+import { ORDER_STATUSES, PRODUCT_STATUSES, type ProductStatus } from './common/enums';
 import { DomainError } from './common/errors';
 import { parsePageable } from './common/pagination';
-import { parseBody, pathUuid } from './common/validation';
+import { parseBody, pathUuid, ValidationError } from './common/validation';
 import type { Container } from './container';
 import { CheckoutSchema, ORDER_SORTS } from './order/order.service';
 import { CategoryCreateSchema } from './product/category.service';
@@ -217,6 +227,85 @@ export function stripeRoutes(c: Container): Router {
   r.post('/webhook-events/:eventId/replay', requireAuth, requireRole('ROLE_ADMIN'), async (req, res) => {
     await webhook.replay(String(req.params.eventId));
     res.json(noContent('Webhook event re-dispatched'));
+  });
+  return r;
+}
+
+/** Admin panel API (FR-AD-01/02/03, FR-IM-11): the whole catalog and every order. */
+export function adminRoutes(c: Container): Router {
+  const r = Router();
+  r.use(requireAuth, requireRole('ROLE_ADMIN'));
+  const admin = c.admin;
+  const query = (req: express.Request, name: string) => {
+    const v = req.query[name];
+    return typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+  };
+  const productStatus = (req: express.Request) => {
+    const v = query(req, 'status');
+    if (v !== undefined && !(PRODUCT_STATUSES as readonly string[]).includes(v)) {
+      throw new ValidationError({ status: `must be one of ${PRODUCT_STATUSES.join(', ')}` });
+    }
+    return v as ProductStatus | undefined;
+  };
+  const categoryId = (req: express.Request) => {
+    const v = query(req, 'categoryId');
+    return v === undefined ? undefined : pathUuid(v, 'categoryId');
+  };
+
+  r.get('/products', async (req, res) => {
+    const pageable = parsePageable(req, { sort: 'updatedAt,desc', allowedSorts: ADMIN_PRODUCT_SORTS });
+    const filter = { search: query(req, 'search'), status: productStatus(req), categoryId: categoryId(req) };
+    res.json(ok(await admin.listProducts(filter, pageable)));
+  });
+  r.get('/products/status-counts', async (req, res) => {
+    res.json(ok(await admin.productStatusCounts({ search: query(req, 'search'), categoryId: categoryId(req) })));
+  });
+  r.post('/products/status', async (req, res) => {
+    const result = await admin.setStatus(parseBody(BulkStatusSchema, req.body));
+    res.json(ok(result, `${result.products} product(s) set to ${result.status}`));
+  });
+  r.get('/products/:id', async (req, res) => {
+    res.json(ok(await admin.getProduct(pathUuid(req.params.id))));
+  });
+  r.patch('/products/:id', async (req, res) => {
+    const input = parseBody(ParentUpdateSchema, req.body);
+    res.json(ok(await admin.updateProduct(pathUuid(req.params.id), input), 'Product updated'));
+  });
+  r.patch('/variants/:id', async (req, res) => {
+    const input = parseBody(VariantUpdateSchema, req.body);
+    res.json(ok(await admin.updateVariant(pathUuid(req.params.id), input), 'Variant updated'));
+  });
+  r.post('/variants/:id/stock-adjustments', async (req, res) => {
+    const input = parseBody(StockAdjustmentSchema, req.body);
+    res.json(ok(await admin.adjustStock(pathUuid(req.params.id), input), 'Stock adjusted'));
+  });
+
+  r.get('/inventory', async (req, res) => {
+    const pageable = parsePageable(req, { sort: 'sku', allowedSorts: ADMIN_INVENTORY_SORTS });
+    const stock = query(req, 'stock');
+    if (stock !== undefined && stock !== 'low' && stock !== 'out') {
+      throw new ValidationError({ stock: 'must be one of low, out' });
+    }
+    const filter = { search: query(req, 'search'), categoryId: categoryId(req), stock: stock as 'low' | 'out' | undefined };
+    res.json(ok(await admin.listInventory(filter, pageable)));
+  });
+  r.get('/inventory/stats', async (_req, res) => {
+    res.json(ok(await admin.inventoryStats()));
+  });
+
+  r.get('/orders', async (req, res) => {
+    const pageable = parsePageable(req, { sort: 'createdAt,desc', allowedSorts: ADMIN_ORDER_SORTS });
+    const status = query(req, 'status');
+    if (status !== undefined && !(ORDER_STATUSES as readonly string[]).includes(status)) {
+      throw new ValidationError({ status: `must be one of ${ORDER_STATUSES.join(', ')}` });
+    }
+    res.json(ok(await admin.listOrders({ search: query(req, 'search'), status }, pageable)));
+  });
+  r.get('/orders/stats', async (_req, res) => {
+    res.json(ok(await admin.orderStats()));
+  });
+  r.get('/orders/:id', async (req, res) => {
+    res.json(ok(await admin.getOrder(pathUuid(req.params.id))));
   });
   return r;
 }

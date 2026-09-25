@@ -1,4 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
+import { AdminService } from './admin/admin.service';
 import { AuthService } from './auth/auth.service';
 import { JwtService } from './auth/jwt';
 import { CartService } from './cart/cart.service';
@@ -29,6 +30,7 @@ export interface Container {
   catalogImport: CatalogImportService;
   cart: CartService;
   orders: OrderService;
+  admin: AdminService;
   expiry: OrderExpiryService;
   webhookStore: WebhookEventStore;
   /** Present only when PAYMENT_PROVIDER=stripe. */
@@ -65,6 +67,7 @@ export function createContainer(
     catalogImport: new CatalogImportService(prisma, new CatalogFileReader(config.catalogImport.maxRows)),
     cart: new CartService(prisma),
     orders,
+    admin: new AdminService(prisma),
     expiry: new OrderExpiryService(prisma, gateway, config.order.pendingExpiryMinutes),
     webhookStore,
     stripeWebhook: stripe

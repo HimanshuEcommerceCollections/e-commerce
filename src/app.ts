@@ -13,6 +13,7 @@ import {
   orderRoutes,
   productRoutes,
   stripeRoutes,
+  adminRoutes,
 } from './routes';
 
 export function createApp(c: Container): Express {
@@ -52,6 +53,7 @@ export function createApp(c: Container): Express {
   app.use('/api/users/me/addresses', addressRoutes(c));
   app.use('/api/cart', cartRoutes(c));
   app.use('/api/orders', orderRoutes(c));
+  app.use('/api/admin', adminRoutes(c));
 
   app.use(notFoundHandler);
   app.use(errorHandler);
