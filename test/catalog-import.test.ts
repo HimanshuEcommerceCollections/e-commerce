@@ -3,6 +3,7 @@ import ExcelJS from 'exceljs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { InvalidImportFileError } from '../src/common/errors';
 import { ALL_COLUMNS } from '../src/product/importer/columns';
+import { categoryCode } from '../src/product/importer/sku-codes';
 import { templateCsv } from '../src/product/importer/template';
 import { harness } from './support/harness';
 
@@ -107,7 +108,6 @@ describe('catalog import', () => {
     expect(byRow.get(9)!.reason).toContain(`differs from the other variants of '${parent}' (row 2`);
     expect(byRow.get(10)!.sku).toBeNull();
     for (const part of [
-      'SKU_ID is required',
       'Product_Name is required',
       'Category is required',
       "Product_Status 'LIVE' is not one of",
@@ -146,6 +146,90 @@ describe('catalog import', () => {
     );
     expect(otherMerchant.importedRows).toBe(0);
     expect(otherMerchant.errors[0].reason).toContain('already used by another product');
+  });
+
+  it('generates parent codes and variant SKUs for rows without them', async () => {
+    const header = 'Product_Name,Brand,Category,Subcategory,Product_Status,Color,Size,Selling_Price,Inventory_Qty,Image_1_URL';
+    const sheet = (...rows: string[]) => ({
+      originalname: 'sheet.csv',
+      buffer: Buffer.from(`${header}\n${rows.join('\n')}\n`, 'utf8'),
+    });
+    const category = await fixtures.newCategory(`Widgets ${run}`, `widgets-${run.toLowerCase()}`);
+    const cat = categoryCode(category.name, category.slug);
+    const c = category.slug;
+    const brand = `Brand ${run}`;
+    const tee = `${brand} Crew Tee`;
+    // The database is shared, so sequences are checked for shape and order, not value.
+    const code = (sub: string) => new RegExp(`^GS-${cat}-${sub}-\\d{3}$`);
+    const seq = (parentCode: string) => Number(parentCode.slice(-3));
+
+    const first = await importer.importFile(
+      sheet(
+        /* row 2 */ row(`${tee} — Black, M`, brand, c, 'Men', 'Active', 'Black', 'M', '20', '5', img('1')),
+        /* row 3 */ row(`${tee} — Light Blue, L`, brand, c, 'Men', 'Active', 'Light Blue', 'L', '20', '5', img('2')),
+        /* row 4 */ row(`${brand} Scarf — Grey, One Size`, brand, c, 'Women', 'Draft', 'Grey', 'One Size', '15', '3', img('3')),
+        /* row 5 */ row(`${tee} — Black, M`, brand, c, 'Men', 'Active', 'Black', 'M', '20', '5', img('4')),
+        /* row 6 */ row(`${tee} — Navy, 4-5Y`, brand, c, 'Kids', 'Active', 'Navy', '4-5Y', '12', '9', img('5')),
+      ),
+      merchantId,
+    );
+
+    expect(first.errors.map((e) => [e.row, e.sku, e.reason])).toEqual([
+      [2, null, `Variant 'Black / M' of '${tee}' appears more than once in the file (rows 2, 5)`],
+      [5, null, `Variant 'Black / M' of '${tee}' appears more than once in the file (rows 2, 5)`],
+    ]);
+    const [men, women, kids] = first.imported;
+    expect(first.imported.map((i) => i.row)).toEqual([3, 4, 6]);
+    expect(men.parentProductId).toMatch(code('MEN'));
+    expect(men.sku).toBe(`${men.parentProductId}-LGHBLU-L`);
+    expect(women.parentProductId).toMatch(code('WOM'));
+    expect(women.sku).toBe(`${women.parentProductId}-GRY-OS`);
+    expect(kids.parentProductId).toMatch(code('KID'));
+    expect(kids.sku).toBe(`${kids.parentProductId}-NVY-45Y`);
+    expect(first.imported.every((i) => i.generated)).toBe(true);
+    expect(first).toMatchObject({ parentProductsCreated: 3, ignoredColumns: [] });
+    const { parent } = await variantsOf(men.parentProductId);
+    expect(parent).toMatchObject({ name: tee, brand, categoryId: category.id });
+
+    // Re-importing joins the existing parent: known variants are rejected, new ones added.
+    const second = await importer.importFile(
+      sheet(
+        /* row 2 */ row(`${tee} — Light Blue, L`, brand, c, 'Men', 'Active', 'Light Blue', 'L', '20', '5', img('6')),
+        /* row 3 */ row(`${tee} — Black, M`, brand, c, 'Men', 'Active', 'Black', 'M', '20', '5', img('7')),
+        /* row 4 */ row(`${brand} Polo — Black, M`, brand, c, 'Men', 'Active', 'Black', 'M', '25', '5', img('8')),
+      ),
+      merchantId,
+    );
+    expect(second.errors).toEqual([
+      {
+        row: 2,
+        sku: null,
+        reason: `Variant 'Light Blue / L' of '${men.parentProductId}' already exists in the catalog as SKU ${men.sku}`,
+      },
+    ]);
+    const [teeBlack, polo] = second.imported;
+    expect(teeBlack).toEqual({ row: 3, sku: `${men.parentProductId}-BLK-M`, parentProductId: men.parentProductId, generated: true });
+    expect(polo.parentProductId).toMatch(code('MEN'));
+    expect(seq(polo.parentProductId)).toBeGreaterThan(seq(men.parentProductId));
+    expect(polo.sku).toBe(`${polo.parentProductId}-BLK-M`);
+    expect(second.parentProductsCreated).toBe(1);
+    expect((await variantsOf(men.parentProductId)).variants.map((v) => v.sku)).toEqual([teeBlack.sku, men.sku]);
+  });
+
+  it('generates SKUs under a given Parent_Product_ID, and keeps given SKUs', async () => {
+    const parent = `GS-CL-${run}`;
+    const c = clothing.slug;
+    const report = await importCsv(
+      row('', parent, 'Tee', '', c, 'ACTIVE', '', 'Black', 'M', '10', '1', '', img('1'), '', ''),
+      row(sku('GIVEN'), parent, 'Tee', '', c, 'ACTIVE', '', 'White', 'M', '10', '1', '', img('2'), '', ''),
+      row('', '', 'Mug', '', c, 'ACTIVE', '', '', '', '10', '1', '', img('3'), '', ''),
+    );
+    expect(report.errors).toEqual([]);
+    expect(report.imported.map((i) => [i.sku, i.parentProductId, i.generated])).toEqual([
+      [`${parent}-BLK-M`, parent, true],
+      [sku('GIVEN'), parent, false],
+      [expect.stringMatching(/^GS-CL-GEN-\d{3}$/), expect.stringMatching(/^GS-CL-GEN-\d{3}$/), true],
+    ]);
   });
 
   it('reads Excel workbooks, including numeric cells and spaced headers', async () => {

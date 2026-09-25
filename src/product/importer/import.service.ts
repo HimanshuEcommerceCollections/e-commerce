@@ -5,6 +5,8 @@ import { logger } from '../../common/logger';
 import { TX } from '../../db';
 import { COLUMNS, IMAGE_COLUMNS, isKnownHeader, type ImportColumn, type ImportRow } from './columns';
 import type { CatalogFileReader, UploadedFile } from './file-reader';
+import { CodeAssigner, type ParentRef } from './code-assigner';
+import { baseProductName } from './sku-codes';
 
 const log = logger('catalog-import');
 
@@ -28,15 +30,32 @@ export interface CatalogImportReport {
   parentProductsCreated: number;
   /** File columns the importer doesn't read yet. */
   ignoredColumns: string[];
+  /** The SKU and parent code of every imported row, generated or given. */
+  imported: ImportedRow[];
   errors: RowError[];
 }
 
+export interface ImportedRow {
+  row: number;
+  sku: string;
+  parentProductId: string;
+  /** Whether the importer generated the SKU (the row had no SKU_ID). */
+  generated: boolean;
+}
+
 /** Validation state of one row; the parsed fields are meaningful only while it is valid. */
-class RowResult {
+export class RowResult {
   readonly reasons: string[] = [];
+  /** Given in the file, or generated when `generated`; empty until then. */
   sku = '';
+  /** True when the row had no SKU_ID, so the importer assigns one. */
+  generated = false;
+  /** Given, the row's own SKU, or generated; empty until then. */
   parentCode = '';
   name: string | null = null;
+  /** Product_Name without the variant part, e.g. " — Black, M"; names a new parent. */
+  baseName = '';
+  subcategory: string | null = null;
   brand: string | null = null;
   variantName: string | null = null;
   color: string | null = null;
@@ -82,6 +101,10 @@ class RowResult {
  * takes its details from its first valid row; an existing code (imported
  * earlier) gains the new variants and keeps its own details.
  *
+ * Rows without a SKU_ID get generated codes (see CodeAssigner): rows without a
+ * Parent_Product_ID are grouped into parents by category, subcategory, brand
+ * and product name, and each variant gets a SKU from its colour and size.
+ *
  * Valid rows are written in one transaction, as three bulk inserts.
  */
 export class CatalogImportService {
@@ -100,8 +123,21 @@ export class CatalogImportService {
     await this.rejectSkusAlreadyInCatalog(results);
     const existingParents = await this.rejectParentConflicts(results, merchantId);
 
+    const parents = new Map<string, ParentRef>();
+    for (const [code, p] of existingParents) parents.set(code, { id: p.id, categoryId: p.categoryId });
+
+    let parentsCreated = 0;
+    if (results.some((r) => r.valid)) {
+      parentsCreated = await this.prisma.$transaction(async (tx) => {
+        if (results.some((r) => r.valid && r.generated)) {
+          // Serializes code generation, so concurrent imports never pick the same sequence.
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('catalog-import-codes'))`;
+          await new CodeAssigner(tx, merchantId, parents).assign(results);
+        }
+        return this.save(tx, results.filter((r) => r.valid), parents, merchantId);
+      }, TX.catalogImport);
+    }
     const valid = results.filter((r) => r.valid);
-    const parentsCreated = await this.save(valid, existingParents, merchantId);
 
     const errors = results
       .filter((r) => !r.valid)
@@ -121,6 +157,9 @@ export class CatalogImportService {
       failedRows: errors.length,
       parentProductsCreated: parentsCreated,
       ignoredColumns: parsed.headers.filter((h) => !isKnownHeader(h)),
+      imported: valid
+        .sort((a, b) => a.row.rowNumber - b.row.rowNumber)
+        .map((r) => ({ row: r.row.rowNumber, sku: r.sku, parentProductId: r.parentCode, generated: r.generated })),
       errors,
     };
   }
@@ -129,13 +168,13 @@ export class CatalogImportService {
 
   /** FR-IM-05, against the catalog (soft-deleted SKUs included — the DB constraint is global). */
   private async rejectSkusAlreadyInCatalog(results: RowResult[]) {
-    const candidates = [...new Set(results.filter((r) => r.valid).map((r) => r.sku))];
+    const candidates = [...new Set(results.filter((r) => r.valid && r.sku).map((r) => r.sku))];
     if (!candidates.length) return;
     const existing = new Set(
       (await this.prisma.product.findMany({ where: { sku: { in: candidates } }, select: { sku: true } })).map((p) => p.sku),
     );
     for (const r of results) {
-      if (r.valid && existing.has(r.sku)) r.reject('SKU_ID already exists in the catalog');
+      if (r.valid && r.sku && existing.has(r.sku)) r.reject('SKU_ID already exists in the catalog');
     }
   }
 
@@ -145,7 +184,7 @@ export class CatalogImportService {
    * the valid rows attach to, keyed by code.
    */
   private async rejectParentConflicts(results: RowResult[], merchantId: string) {
-    const codes = [...new Set(results.filter((r) => r.valid).map((r) => r.parentCode))];
+    const codes = [...new Set(results.filter((r) => r.valid && r.parentCode).map((r) => r.parentCode))];
     const existing = new Map<string, ParentProduct & { category: ProductCategory | null }>();
     if (codes.length) {
       for (const p of await this.prisma.parentProduct.findMany({ where: { code: { in: codes } }, include: { category: true } })) {
@@ -155,7 +194,7 @@ export class CatalogImportService {
 
     const firstRowOfGroup = new Map<string, RowResult>();
     for (const r of results) {
-      if (!r.valid) continue;
+      if (!r.valid || !r.parentCode) continue;
       const parent = existing.get(r.parentCode);
       if (parent) {
         if (parent.deleted || parent.merchantId !== merchantId) {
@@ -184,9 +223,9 @@ export class CatalogImportService {
   // ── Persistence ──────────────────────────────────────────────────────────
 
   /** Writes the valid rows; returns how many parent products were created. */
-  private async save(valid: RowResult[], existingParents: Map<string, ParentProduct>, merchantId: string) {
-    const parentIds = new Map<string, { id: string; categoryId: string | null }>();
-    for (const [code, p] of existingParents) parentIds.set(code, { id: p.id, categoryId: p.categoryId });
+  private async save(tx: Prisma.TransactionClient, valid: RowResult[], existingParents: Map<string, ParentRef>, merchantId: string) {
+    if (!valid.length) return 0;
+    const parentIds = new Map(existingParents);
 
     const newParents: Prisma.ParentProductCreateManyInput[] = [];
     for (const r of valid) {
@@ -196,7 +235,7 @@ export class CatalogImportService {
       newParents.push({
         id,
         code: r.parentCode,
-        name: r.name!,
+        name: r.baseName,
         brand: r.brand,
         shortDescription: r.shortDescription,
         description: r.longDescription,
@@ -235,13 +274,9 @@ export class CatalogImportService {
       );
     }
 
-    if (valid.length) {
-      await this.prisma.$transaction(async (tx) => {
-        if (newParents.length) await tx.parentProduct.createMany({ data: newParents });
-        await tx.product.createMany({ data: products });
-        if (images.length) await tx.productImage.createMany({ data: images });
-      }, TX.catalogImport);
-    }
+    if (newParents.length) await tx.parentProduct.createMany({ data: newParents });
+    await tx.product.createMany({ data: products });
+    if (images.length) await tx.productImage.createMany({ data: images });
     return newParents.length;
   }
 }
@@ -252,7 +287,7 @@ function validate(row: ImportRow, categories: CategoryLookup): RowResult {
   const r = new RowResult(row);
 
   r.sku = row.get(COLUMNS.SKU_ID);
-  if (!r.sku) r.reject('SKU_ID is required');
+  if (!r.sku) r.generated = true;
   else checkCode(r, COLUMNS.SKU_ID, r.sku);
 
   const parentCode = row.get(COLUMNS.PARENT_PRODUCT_ID);
@@ -260,6 +295,7 @@ function validate(row: ImportRow, categories: CategoryLookup): RowResult {
   r.parentCode = parentCode || r.sku;
 
   r.name = required(r, COLUMNS.PRODUCT_NAME, 255);
+  r.subcategory = optional(r, COLUMNS.SUBCATEGORY, 100);
   r.brand = optional(r, COLUMNS.BRAND, 100);
   r.variantName = optional(r, COLUMNS.VARIANT_NAME, 150);
   r.color = optional(r, COLUMNS.COLOR, 50);
@@ -269,6 +305,7 @@ function validate(row: ImportRow, categories: CategoryLookup): RowResult {
   r.style = optional(r, COLUMNS.STYLE, 100);
   r.shortDescription = optional(r, COLUMNS.SHORT_DESCRIPTION, 1000);
   r.longDescription = optional(r, COLUMNS.LONG_DESCRIPTION, 5000);
+  if (r.name) r.baseName = baseProductName(r.name, r.color, r.size);
 
   const category = row.get(COLUMNS.CATEGORY);
   if (!category) r.reject('Category is required');
