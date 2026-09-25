@@ -15,11 +15,14 @@ export interface ImportColumn {
 const col = (header: string, requiredColumn = false): ImportColumn => ({ header, requiredColumn });
 
 export const COLUMNS = {
-  SKU_ID: col('SKU_ID', true),
+  // Optional: rows without a SKU_ID (and Parent_Product_ID) get generated codes.
+  SKU_ID: col('SKU_ID'),
   PARENT_PRODUCT_ID: col('Parent_Product_ID'),
   PRODUCT_NAME: col('Product_Name', true),
   BRAND: col('Brand'),
   CATEGORY: col('Category', true),
+  // Not stored yet; read for the subcategory segment of generated codes.
+  SUBCATEGORY: col('Subcategory'),
   PRODUCT_STATUS: col('Product_Status', true),
   VARIANT_NAME: col('Variant_Name'),
   COLOR: col('Color'),
