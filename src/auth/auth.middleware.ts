@@ -16,20 +16,31 @@ declare module 'express-serve-static-core' {
  * Reads the Bearer token on every request and, when valid, attaches the user.
  * Never rejects: a missing or bad token leaves the request anonymous, and the
  * route guards below decide. The user (and so the role) is re-read from the
- * database each time, as the Java filter did.
+ * database each time, as the Java filter did. Tokens issued before the
+ * user's last password change are refused ("sign out other devices").
  */
 export function authenticate(jwt: JwtService, db: Db): RequestHandler {
   return async (req, _res, next) => {
     const header = req.headers.authorization;
     if (header?.startsWith('Bearer ')) {
-      const email = jwt.verify(header.slice('Bearer '.length));
-      if (email) {
-        const user = await db.user.findUnique({ where: { email } });
-        if (user) req.user = user;
+      const claims = jwt.verifyClaims(header.slice('Bearer '.length));
+      if (claims) {
+        const user = await db.user.findUnique({ where: { email: claims.email } });
+        if (user && issuedAfterPasswordChange(claims.issuedAtSeconds, user.passwordChangedAt)) req.user = user;
       }
     }
     next();
   };
+}
+
+/**
+ * JWT `iat` has whole-second precision, so a token issued in the same second
+ * as the change (the fresh one handed back by it) still counts as after it.
+ */
+export function issuedAfterPasswordChange(issuedAtSeconds: number | null, passwordChangedAt: Date | null): boolean {
+  if (!passwordChangedAt) return true;
+  if (issuedAtSeconds === null) return false;
+  return issuedAtSeconds >= Math.floor(passwordChangedAt.getTime() / 1000);
 }
 
 /**

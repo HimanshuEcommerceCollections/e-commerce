@@ -2,8 +2,9 @@ import type { RequestHandler } from 'express';
 import { failure } from '../common/api-response';
 
 /**
- * Per-client-IP token bucket for the public auth endpoints — login and register
- * are otherwise unbounded brute-force targets. In-memory and per instance, with
+ * Per-client-IP token bucket for the public auth endpoints — login, register
+ * and password reset — and guest order tracking (order number + ZIP is
+ * guessable): otherwise unbounded brute-force targets. In-memory and per instance, with
  * an LRU bound so hostile traffic can't exhaust memory; move to a shared store
  * when scaling out.
  */
@@ -14,12 +15,21 @@ interface Bucket {
   updatedAt: number;
 }
 
-export function authRateLimit(options: { enabled: boolean; capacity: number; refillPerMinute: number }): RequestHandler {
+export const RATE_LIMITED_PATHS = ['/api/auth/', '/api/orders/track'] as const;
+
+export function authRateLimit(options: {
+  enabled: boolean;
+  capacity: number;
+  refillPerMinute: number;
+  /** Path prefixes sharing the bucket. */
+  paths?: readonly string[];
+}): RequestHandler {
   const buckets = new Map<string, Bucket>();
   const refillPerMs = options.refillPerMinute / 60_000;
+  const paths = options.paths ?? RATE_LIMITED_PATHS;
 
   return (req, res, next) => {
-    if (!options.enabled || !req.path.startsWith('/api/auth/')) {
+    if (!options.enabled || !paths.some((p) => req.path.startsWith(p))) {
       next();
       return;
     }
