@@ -65,9 +65,10 @@ describe('HTTP error contract', () => {
         email: 'Must be a valid email address',
         password: 'Password must be between 8 and 100 characters',
         fullName: 'Full name is required',
-        phoneNumber: 'Phone number is required',
       },
     });
+    // The phone number is optional since the storefront build.
+    expect(res.body.data).not.toHaveProperty('phoneNumber');
   });
 
   it('malformed JSON and malformed ids are 400s', async () => {

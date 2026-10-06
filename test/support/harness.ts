@@ -29,6 +29,8 @@ export function harness(options: { gateway?: PaymentGateway; env?: Record<string
     PAYMENT_PROVIDER: 'manual',
     RATE_LIMIT_ENABLED: 'false',
     LOG_LEVEL: 'error',
+    // No network in tests: image URL checks are opted into per file (FR-IM-08 tests).
+    IMAGE_CHECKS_ENABLED: 'false',
     ...options.env,
   });
   const prisma = new PrismaClient({ datasourceUrl: config.databaseUrl });

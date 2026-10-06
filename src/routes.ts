@@ -1,33 +1,38 @@
 import express, { Router } from 'express';
-import multer from 'multer';
-import {
-  ADMIN_INVENTORY_SORTS,
-  ADMIN_ORDER_SORTS,
-  ADMIN_PRODUCT_SORTS,
-  BulkStatusSchema,
-  ParentUpdateSchema,
-  StockAdjustmentSchema,
-  VariantUpdateSchema,
-} from './admin/admin.service';
 import { assertRole, currentUser, requireAuth, requireRole } from './auth/auth.middleware';
-import { LoginSchema, RegisterSchema } from './auth/auth.service';
-import { CartItemSchema, CartItemUpdateSchema } from './cart/cart.service';
+import {
+  LoginSchema,
+  PasswordResetConfirmSchema,
+  PasswordResetRequestSchema,
+  RegisterSchema,
+} from './auth/auth.service';
+import { CartItemSchema, CartItemUpdateSchema, CartLinesBodySchema } from './cart/cart.service';
 import { created, noContent, ok } from './common/api-response';
-import { ORDER_STATUSES, PRODUCT_STATUSES, type ProductStatus } from './common/enums';
-import { DomainError } from './common/errors';
+import { ORDER_STATUSES } from './common/enums';
 import { parsePageable } from './common/pagination';
 import { parseBody, pathUuid, ValidationError } from './common/validation';
 import type { Container } from './container';
-import { CheckoutSchema, ORDER_SORTS } from './order/order.service';
+import { storeConfig } from './store/store-config';
+import { CheckoutSchema, ORDER_SORTS, ReturnRequestSchema, type OrderListFilter } from './order/order.service';
 import { CategoryCreateSchema } from './product/category.service';
-import { templateCsv } from './product/importer/template';
 import { PRODUCT_SORTS, ProductCreateSchema, ProductUpdateSchema } from './product/product.service';
 import { AddressSchema } from './user/address.service';
 
 // Route guards follow the Java security config: /api/auth, /api/products,
-// /api/categories and the Stripe webhook are public paths (role checks there
-// answer 403); every other /api path needs a token first (401). Where a route
-// takes a body, it is validated before the role check (Spring's order).
+// /api/categories, /api/store and the Stripe webhook are public paths (role
+// checks there answer 403); every other /api path needs a token first (401).
+// Where a route takes a body, it is validated before the role check (Spring's order).
+
+/**
+ * FR-AD-08: catalog staff manage products, variants, inventory, images,
+ * categories and catalog files; orders, returns, customers, users, analytics,
+ * reports and settings stay with admins.
+ */
+export const CATALOG_ROLES = ['ROLE_ADMIN', 'ROLE_CATALOG'] as const;
+
+/** Admins and catalog staff see unpublished products on the public product routes. */
+const isCatalogStaff = (user: { role: string } | undefined) =>
+  user !== undefined && (CATALOG_ROLES as readonly string[]).includes(user.role);
 
 export function authRoutes(c: Container): Router {
   const r = Router();
@@ -38,6 +43,15 @@ export function authRoutes(c: Container): Router {
   r.post('/login', async (req, res) => {
     res.json(ok(await c.auth.login(parseBody(LoginSchema, req.body)), 'Login successful'));
   });
+  /** Always the same answer, so it never reveals whether an account exists. */
+  r.post('/password-reset/request', async (req, res) => {
+    await c.auth.requestPasswordReset(parseBody(PasswordResetRequestSchema, req.body));
+    res.json(noContent('If an account exists for that email, a reset link is on its way'));
+  });
+  r.post('/password-reset/confirm', async (req, res) => {
+    const data = await c.auth.confirmPasswordReset(parseBody(PasswordResetConfirmSchema, req.body));
+    res.json(ok(data, 'Password updated'));
+  });
   return r;
 }
 
@@ -46,12 +60,16 @@ export function categoryRoutes(c: Container): Router {
   r.get('/', async (_req, res) => {
     res.json(ok(await c.categories.findAll()));
   });
+  // Before '/:id', or "tree" would be taken for an id.
+  r.get('/tree', async (_req, res) => {
+    res.json(ok(await c.categories.tree()));
+  });
   r.get('/:id', async (req, res) => {
     res.json(ok(await c.categories.findById(pathUuid(req.params.id))));
   });
   r.post('/', async (req, res) => {
     const input = parseBody(CategoryCreateSchema, req.body);
-    assertRole(req, 'ROLE_ADMIN');
+    assertRole(req, ...CATALOG_ROLES);
     const data = await c.categories.create(input);
     res.status(201).json(created(data, 'Category created successfully'));
   });
@@ -70,12 +88,17 @@ export function productRoutes(c: Container): Router {
   r.get('/my', requireRole('ROLE_MERCHANT'), async (req, res) => {
     res.json(ok(await c.products.findByMerchant(currentUser(req).id, pageable(req))));
   });
+  r.get('/slug/:slug', async (req, res) => {
+    const user = req.user;
+    const slug = String(req.params.slug).trim().toLowerCase();
+    res.json(ok(await c.products.findBySlug(slug, user?.id ?? null, isCatalogStaff(user))));
+  });
   r.get('/category/:categoryId', async (req, res) => {
     res.json(ok(await c.products.findByCategory(pathUuid(req.params.categoryId, 'categoryId'), pageable(req))));
   });
   r.get('/:id', async (req, res) => {
     const user = req.user;
-    res.json(ok(await c.products.findById(pathUuid(req.params.id), user?.id ?? null, user?.role === 'ROLE_ADMIN')));
+    res.json(ok(await c.products.findById(pathUuid(req.params.id), user?.id ?? null, isCatalogStaff(user))));
   });
   r.post('/', async (req, res) => {
     const input = parseBody(ProductCreateSchema, req.body);
@@ -91,40 +114,6 @@ export function productRoutes(c: Container): Router {
   r.delete('/:id', requireRole('ROLE_MERCHANT'), async (req, res) => {
     await c.products.softDelete(pathUuid(req.params.id), currentUser(req).id);
     res.json(noContent('Product removed successfully'));
-  });
-  return r;
-}
-
-/** Bulk catalog import (FR-IM-01/02). Imported products belong to the caller. */
-export function catalogImportRoutes(c: Container): Router {
-  const r = Router();
-  const upload = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: c.config.catalogImport.maxFileSizeBytes, files: 1 },
-  });
-  r.use(requireAuth, requireRole('ROLE_MERCHANT', 'ROLE_ADMIN'));
-
-  r.post(
-    '/',
-    (req, _res, next) => {
-      if (!req.is('multipart/form-data')) {
-        throw new DomainError(415, `Unsupported content type: ${req.headers['content-type'] ?? 'none'}`);
-      }
-      next();
-    },
-    upload.single('file'),
-    async (req, res) => {
-      if (!req.file) throw new DomainError(400, "Send the file as multipart/form-data in a part named 'file'");
-      const report = await c.catalogImport.importFile(req.file, currentUser(req).id);
-      res.json(ok(report, `Imported ${report.importedRows} of ${report.totalRows} rows`));
-    },
-  );
-
-  r.get('/template', (_req, res) => {
-    res
-      .type('text/csv; charset=utf-8')
-      .attachment('catalog-import-template.csv')
-      .send(templateCsv());
   });
   return r;
 }
@@ -158,8 +147,17 @@ export function addressRoutes(c: Container): Router {
 
 export function cartRoutes(c: Container): Router {
   const r = Router();
+  /** Public: prices a guest's browser cart (FR-ST-09). */
+  r.post('/preview', async (req, res) => {
+    res.json(ok(await c.cart.preview(parseBody(CartLinesBodySchema, req.body).items)));
+  });
   r.use(requireAuth);
   const customer = requireRole('ROLE_CUSTOMER');
+  /** After sign-in: the guest's lines join the account cart (capped at stock). */
+  r.post('/merge', async (req, res) => {
+    const { items } = parseBody(CartLinesBodySchema, req.body);
+    res.json(ok(await c.cart.merge(assertRole(req, 'ROLE_CUSTOMER').id, items), 'Cart merged'));
+  });
   r.get('/', customer, async (req, res) => {
     res.json(ok(await c.cart.getCart(currentUser(req).id)));
   });
@@ -197,20 +195,40 @@ export function orderRoutes(c: Container): Router {
     res.status(201).json(created(data, 'Order placed successfully'));
   });
   r.get('/', customer, async (req, res) => {
-    const pageable = parsePageable(req, { sort: 'createdAt', allowedSorts: ORDER_SORTS });
-    res.json(ok(await c.orders.findMyOrders(currentUser(req).id, pageable)));
+    const pageable = parsePageable(req, { sort: 'createdAt,desc', allowedSorts: ORDER_SORTS });
+    const status = req.query.status;
+    if (status !== undefined && status !== 'open' && status !== 'done') {
+      throw new ValidationError({ status: 'must be one of open, done' });
+    }
+    res.json(ok(await c.orders.findMyOrders(currentUser(req).id, pageable, status as OrderListFilter | undefined)));
   });
+  // ':id' is the order id or its number (EC-1234567).
   r.get('/:id', customer, async (req, res) => {
-    res.json(ok(await c.orders.findById(currentUser(req).id, pathUuid(req.params.id))));
+    res.json(ok(await c.orders.findById(currentUser(req).id, orderRef(req.params.id))));
   });
   r.post('/:id/cancel', customer, async (req, res) => {
-    res.json(ok(await c.orders.cancel(currentUser(req).id, pathUuid(req.params.id)), 'Order cancelled'));
+    res.json(ok(await c.orders.cancel(currentUser(req).id, orderRef(req.params.id)), 'Order cancelled'));
+  });
+  /** FR-AD-07: a return request for a delivered order. */
+  r.post('/:id/returns', async (req, res) => {
+    const input = parseBody(ReturnRequestSchema, req.body);
+    const user = assertRole(req, 'ROLE_CUSTOMER');
+    const data = await c.orders.requestReturn(user.id, orderRef(req.params.id), input);
+    res.status(201).json(created(data, 'Return requested'));
   });
   /** Admin stand-in for a provider callback under the manual gateway: PENDING_PAYMENT → PAID. */
   r.post('/:id/pay', requireRole('ROLE_ADMIN'), async (req, res) => {
     res.json(ok(await c.orders.markPaid(pathUuid(req.params.id)), 'Order marked as paid'));
   });
   return r;
+}
+
+/** An order id or number from the path; anything longer than either is a 400. */
+function orderRef(value: string | string[] | undefined): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 60) {
+    throw new ValidationError({ id: 'must be an order id or order number' });
+  }
+  return value;
 }
 
 /** Mounted only when PAYMENT_PROVIDER=stripe. */
@@ -231,81 +249,11 @@ export function stripeRoutes(c: Container): Router {
   return r;
 }
 
-/** Admin panel API (FR-AD-01/02/03, FR-IM-11): the whole catalog and every order. */
-export function adminRoutes(c: Container): Router {
+/** Public storefront settings (shipping methods, tax mode, payment provider). */
+export function storeRoutes(c: Container): Router {
   const r = Router();
-  r.use(requireAuth, requireRole('ROLE_ADMIN'));
-  const admin = c.admin;
-  const query = (req: express.Request, name: string) => {
-    const v = req.query[name];
-    return typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
-  };
-  const productStatus = (req: express.Request) => {
-    const v = query(req, 'status');
-    if (v !== undefined && !(PRODUCT_STATUSES as readonly string[]).includes(v)) {
-      throw new ValidationError({ status: `must be one of ${PRODUCT_STATUSES.join(', ')}` });
-    }
-    return v as ProductStatus | undefined;
-  };
-  const categoryId = (req: express.Request) => {
-    const v = query(req, 'categoryId');
-    return v === undefined ? undefined : pathUuid(v, 'categoryId');
-  };
-
-  r.get('/products', async (req, res) => {
-    const pageable = parsePageable(req, { sort: 'updatedAt,desc', allowedSorts: ADMIN_PRODUCT_SORTS });
-    const filter = { search: query(req, 'search'), status: productStatus(req), categoryId: categoryId(req) };
-    res.json(ok(await admin.listProducts(filter, pageable)));
-  });
-  r.get('/products/status-counts', async (req, res) => {
-    res.json(ok(await admin.productStatusCounts({ search: query(req, 'search'), categoryId: categoryId(req) })));
-  });
-  r.post('/products/status', async (req, res) => {
-    const result = await admin.setStatus(parseBody(BulkStatusSchema, req.body));
-    res.json(ok(result, `${result.products} product(s) set to ${result.status}`));
-  });
-  r.get('/products/:id', async (req, res) => {
-    res.json(ok(await admin.getProduct(pathUuid(req.params.id))));
-  });
-  r.patch('/products/:id', async (req, res) => {
-    const input = parseBody(ParentUpdateSchema, req.body);
-    res.json(ok(await admin.updateProduct(pathUuid(req.params.id), input), 'Product updated'));
-  });
-  r.patch('/variants/:id', async (req, res) => {
-    const input = parseBody(VariantUpdateSchema, req.body);
-    res.json(ok(await admin.updateVariant(pathUuid(req.params.id), input), 'Variant updated'));
-  });
-  r.post('/variants/:id/stock-adjustments', async (req, res) => {
-    const input = parseBody(StockAdjustmentSchema, req.body);
-    res.json(ok(await admin.adjustStock(pathUuid(req.params.id), input), 'Stock adjusted'));
-  });
-
-  r.get('/inventory', async (req, res) => {
-    const pageable = parsePageable(req, { sort: 'sku', allowedSorts: ADMIN_INVENTORY_SORTS });
-    const stock = query(req, 'stock');
-    if (stock !== undefined && stock !== 'low' && stock !== 'out') {
-      throw new ValidationError({ stock: 'must be one of low, out' });
-    }
-    const filter = { search: query(req, 'search'), categoryId: categoryId(req), stock: stock as 'low' | 'out' | undefined };
-    res.json(ok(await admin.listInventory(filter, pageable)));
-  });
-  r.get('/inventory/stats', async (_req, res) => {
-    res.json(ok(await admin.inventoryStats()));
-  });
-
-  r.get('/orders', async (req, res) => {
-    const pageable = parsePageable(req, { sort: 'createdAt,desc', allowedSorts: ADMIN_ORDER_SORTS });
-    const status = query(req, 'status');
-    if (status !== undefined && !(ORDER_STATUSES as readonly string[]).includes(status)) {
-      throw new ValidationError({ status: `must be one of ${ORDER_STATUSES.join(', ')}` });
-    }
-    res.json(ok(await admin.listOrders({ search: query(req, 'search'), status }, pageable)));
-  });
-  r.get('/orders/stats', async (_req, res) => {
-    res.json(ok(await admin.orderStats()));
-  });
-  r.get('/orders/:id', async (req, res) => {
-    res.json(ok(await admin.getOrder(pathUuid(req.params.id))));
+  r.get('/config', (_req, res) => {
+    res.json(ok(storeConfig(c.config)));
   });
   return r;
 }

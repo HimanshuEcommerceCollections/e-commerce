@@ -13,6 +13,7 @@
     "start": "node dist/server.js",
     "migrate": "node dist/scripts/migrate.js",
     "migrate:dev": "tsx src/scripts/migrate.ts",
+    "seed:demo": "tsx src/scripts/seed-demo.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "prisma:generate": "prisma generate",
