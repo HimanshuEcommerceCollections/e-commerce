@@ -1,10 +1,19 @@
-import { Prisma, type Cart, type PrismaClient } from '@prisma/client';
+import type { Cart, PrismaClient } from '@prisma/client';
 import { z } from 'zod';
-import { money } from '../common/api-response';
 import { CartItemNotFoundError, InsufficientStockError, ProductNotAvailableError } from '../common/errors';
 import { isIntegrityViolation } from '../common/error-handler';
 import { integer, requiredUuid } from '../common/validation';
-import { primaryImageUrl } from '../product/product.mapper';
+import type { Db } from '../db';
+import type { ShippingMethod } from '../common/enums';
+import type { PricingRules } from '../order/pricing';
+import {
+  isPurchasable,
+  loadCartProducts,
+  mergeLineInputs,
+  toCartResponse,
+  toCheckoutQuote,
+  type CartLine,
+} from './cart-pricing';
 
 export const CartItemSchema = z.object({
   productId: requiredUuid(),
@@ -15,13 +24,31 @@ export const CartItemUpdateSchema = z.object({
   quantity: integer({ required: true, positive: true, max: 999 }),
 });
 
+/** A guest's browser cart (preview, merge, quote, guest checkout): at most 100 lines. */
+export const CartLinesSchema = z
+  .array(CartItemSchema, { invalid_type_error: 'must be a list of { productId, quantity }' })
+  .max(100, 'A cart can hold at most 100 lines');
+
+export const CartLinesBodySchema = z.object({
+  items: z.preprocess((v) => v ?? [], CartLinesSchema),
+});
+
+export type CartLineInput = { productId: string; quantity: number };
+
+/** Most a merged line can hold (the add-to-cart limit). */
+const MAX_LINE_QUANTITY = 999;
+
 /**
  * The caller's cart. One live cart per user and one live line per product are
  * enforced by partial unique indexes (V8); the code below leans on them to make
  * concurrent requests safe rather than locking.
  */
 export class CartService {
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(
+    private readonly prisma: PrismaClient,
+    private readonly rules: PricingRules,
+    private readonly currency: string,
+  ) {}
 
   /** Fetch (lazily creating) the caller's cart. */
   async getCart(userId: string) {
@@ -62,6 +89,80 @@ export class CartService {
     const item = await this.prisma.cartItem.findFirst({ where: { cartId: cart.id, productId, deleted: false } });
     if (!item) throw new CartItemNotFoundError(productId);
     await this.prisma.cartItem.update({ where: { id: item.id }, data: { deleted: true } });
+  }
+
+  /**
+   * Prices a guest's browser cart (FR-ST-09) without touching any server
+   * cart. Never fails over availability: unknown or deleted products are
+   * dropped, unbuyable ones come back `available: false`, and quantities are
+   * reported as sent (the client caps them with `stockQuantity`).
+   */
+  async preview(items: CartLineInput[]) {
+    return toCartResponse(null, await this.resolveLines(this.prisma, items), this.rules);
+  }
+
+  /**
+   * After sign-in: adds the guest's lines to the account cart. Each line is
+   * capped at the stock left; unavailable products are skipped.
+   */
+  async merge(userId: string, items: CartLineInput[]) {
+    const cart = await this.getOrCreateCart(userId);
+    const lines = mergeLineInputs(items);
+    const products = await loadCartProducts(this.prisma, lines.map((l) => l.productId));
+    for (const line of lines) {
+      const product = products.get(line.productId);
+      if (!product || !isPurchasable(product)) continue;
+      const cap = Math.min(product.stockQuantity, MAX_LINE_QUANTITY);
+      const existing = await this.prisma.cartItem.findFirst({
+        where: { cartId: cart.id, productId: product.id, deleted: false },
+      });
+      if (existing) {
+        const quantity = Math.min(existing.quantity + line.quantity, cap);
+        if (quantity !== existing.quantity) {
+          await this.prisma.cartItem.update({ where: { id: existing.id }, data: { quantity } });
+        }
+      } else {
+        try {
+          await this.addNewLine(cart.id, product.id, Math.min(line.quantity, cap));
+        } catch (e) {
+          // A concurrent add created the line first; keep theirs.
+          if (!isIntegrityViolation(e)) throw e;
+        }
+      }
+    }
+    return this.buildResponse(cart);
+  }
+
+  /**
+   * Checkout quote (FR-ST-10): shipping options and totals for the given
+   * lines, or — when a signed-in customer sends none — for their server cart.
+   */
+  async quote(items: CartLineInput[] | undefined, customerId: string | null, method: ShippingMethod = 'STANDARD') {
+    const lines =
+      items === undefined
+        ? customerId
+          ? await this.linesForUser(customerId)
+          : []
+        : await this.resolveLines(this.prisma, items);
+    return toCheckoutQuote(lines, method, this.rules, this.currency);
+  }
+
+  /** The caller's live cart lines (for the checkout quote); no cart means none. */
+  async linesForUser(userId: string, db: Db = this.prisma): Promise<CartLine[]> {
+    const cart = await db.cart.findFirst({ where: { userId, deleted: false } });
+    if (!cart) return [];
+    const items = await db.cartItem.findMany({ where: { cartId: cart.id, deleted: false }, orderBy: { createdAt: 'asc' } });
+    return this.resolveLines(db, items);
+  }
+
+  /** Request lines → priced-cart lines; unknown and deleted products drop out. */
+  async resolveLines(db: Db, items: CartLineInput[]): Promise<CartLine[]> {
+    const lines = mergeLineInputs(items);
+    const products = await loadCartProducts(db, lines.map((l) => l.productId));
+    return lines.flatMap((l) => {
+      const product = products.get(l.productId);
+      return product ? [{ product, quantity: l.quantity }] : [];
+    });
   }
 
   /** No cart means nothing to clear — deliberately doesn't create one. */
@@ -128,46 +229,9 @@ export class CartService {
       where: { cartId: cart.id, deleted: false },
       orderBy: { createdAt: 'asc' },
     });
-    // One batch product lookup for the whole cart.
-    const products = new Map(
-      (
-        await this.prisma.product.findMany({
-          where: { id: { in: items.map((i) => i.productId) }, deleted: false },
-          include: { images: { where: { deleted: false }, orderBy: { position: 'asc' } } },
-        })
-      ).map((p) => [p.id, p]),
-    );
-
-    // Soft-deleted products drop out (nothing to show); inactive ones stay with
-    // available=false and don't count toward the totals.
-    const lines = items.flatMap((item) => {
-      const product = products.get(item.productId);
-      if (!product) return [];
-      const available = product.status === 'ACTIVE';
-      const subtotal = available ? product.price.mul(item.quantity) : new Prisma.Decimal(0);
-      return [{ item, product, available, subtotal }];
-    });
-
-    const totalPrice = lines.filter((l) => l.available).reduce((sum, l) => sum.add(l.subtotal), new Prisma.Decimal(0));
-    const totalItems = lines.filter((l) => l.available).reduce((sum, l) => sum + l.item.quantity, 0);
-
-    return {
-      cartId: cart.id,
-      customerId: cart.userId,
-      items: lines.map(({ item, product, available, subtotal }) => ({
-        productId: product.id,
-        productName: product.name,
-        sku: product.sku,
-        primaryImageUrl: primaryImageUrl(product.images),
-        unitPrice: money(product.price),
-        quantity: item.quantity,
-        subtotal: money(subtotal),
-        available,
-      })),
-      totalItems,
-      totalPrice: money(totalPrice),
-      updatedAt: cart.updatedAt,
-    };
+    // Soft-deleted products drop out (nothing to show); unbuyable ones stay
+    // with available=false and don't count toward the totals.
+    return toCartResponse(cart, await this.resolveLines(this.prisma, items), this.rules);
   }
 }
 

@@ -4,15 +4,26 @@ import { authenticate, requireAuth } from './auth/auth.middleware';
 import { authRateLimit } from './auth/rate-limit';
 import { errorHandler, notFoundHandler } from './common/error-handler';
 import type { Container } from './container';
+import { adminCatalogRoutes } from './admin/catalog.routes';
+import { adminOpsRoutes } from './admin/ops.routes';
+import { catalogRoutes } from './product/catalog.routes';
+import {
+  accountRoutes,
+  analyticsRoutes,
+  checkoutRoutes,
+  sellerApplicationRoutes,
+  supportRoutes,
+  trackRoutes,
+} from './commerce.routes';
 import {
   addressRoutes,
   authRoutes,
   cartRoutes,
-  catalogImportRoutes,
   categoryRoutes,
   orderRoutes,
   productRoutes,
   stripeRoutes,
+  storeRoutes,
 } from './routes';
 
 export function createApp(c: Container): Express {
@@ -46,12 +57,23 @@ export function createApp(c: Container): Express {
 
   app.use('/actuator', healthRoutes(c));
   app.use('/api/auth', authRoutes(c));
+  app.use('/api/store', storeRoutes(c));
   app.use('/api/categories', categoryRoutes(c));
   app.use('/api/products', productRoutes(c));
-  app.use('/api/catalog/import', catalogImportRoutes(c));
+  app.use('/api/catalog', catalogRoutes(c));
   app.use('/api/users/me/addresses', addressRoutes(c));
+  app.use('/api/users/me', accountRoutes(c));
   app.use('/api/cart', cartRoutes(c));
+  app.use('/api/checkout', checkoutRoutes(c));
+  // Public, so before the signed-in order routes.
+  app.use('/api/orders/track', trackRoutes(c));
   app.use('/api/orders', orderRoutes(c));
+  app.use('/api/support', supportRoutes(c));
+  app.use('/api/seller-applications', sellerApplicationRoutes(c));
+  app.use('/api/analytics', analyticsRoutes(c));
+  // Admin-only operations first: their per-route guards let catalog paths fall through.
+  app.use('/api/admin', adminOpsRoutes(c));
+  app.use('/api/admin', adminCatalogRoutes(c));
 
   app.use(notFoundHandler);
   app.use(errorHandler);

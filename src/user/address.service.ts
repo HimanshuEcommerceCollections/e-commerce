@@ -165,6 +165,46 @@ async function resolveOwned(db: Db, userId: string, id: string) {
   return address;
 }
 
+/**
+ * Keeps an address typed at checkout ("save for next time"). Best effort, in
+ * the checkout transaction: skipped when the same address is already saved or
+ * the account is at its limit — checkout never fails over it.
+ */
+export async function saveCheckoutAddress(
+  db: Db,
+  userId: string,
+  a: {
+    recipientName: string;
+    phone: string | null;
+    addressLine1: string;
+    addressLine2: string | null;
+    city: string;
+    state: string;
+    postalCode: string;
+    country: string;
+  },
+  maxPerUser: number,
+) {
+  await lockUser(db, userId);
+  const existing = await db.userAddress.findMany({ where: { userId, deleted: false } });
+  const same = (x: string | null, y: string | null) => (x ?? '').trim().toLowerCase() === (y ?? '').trim().toLowerCase();
+  if (
+    existing.some(
+      (e) =>
+        same(e.recipientName, a.recipientName) &&
+        same(e.addressLine1, a.addressLine1) &&
+        same(e.addressLine2, a.addressLine2) &&
+        same(e.postalCode, a.postalCode),
+    ) ||
+    existing.length >= maxPerUser
+  ) {
+    return null;
+  }
+  return db.userAddress.create({
+    data: { userId, label: existing.length === 0 ? 'Home' : 'Other', ...a, isDefault: existing.length === 0 },
+  });
+}
+
 async function lockUser(db: Db, userId: string) {
   // ::text — pg_advisory_xact_lock returns void, which Prisma can't deserialize.
   await db.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${'user_address:' + userId}))::text`;

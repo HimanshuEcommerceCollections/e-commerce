@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import type { RowResult } from './import.service';
+import { nextFree } from './slugs';
 import { SKU_PREFIX, categoryCode, colorCode, sizeCode, subcategoryCode, variantCode } from './sku-codes';
 
 export interface ParentRef {
@@ -16,24 +17,40 @@ interface Group {
   prefix: string;
 }
 
-const norm = (value: string | null) => (value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+export interface AssignOptions {
+  /** Catalog staff may join a parent product any account created. */
+  staff: boolean;
+  /** Add product: the rows form one new parent product, never an existing one. */
+  forceNewParent: boolean;
+  /** Upsert: a generated row naming an existing variant (same colour and size) updates it. */
+  allowUpdates: boolean;
+}
+
+const norm = (value: string | null | undefined) => (value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const variantKey = (r: RowResult) => [r.color, r.size, r.color || r.size ? null : r.variantName].map(norm).join('|');
 const variantLabel = (r: RowResult) =>
   [r.color, r.size].filter(Boolean).join(' / ') || r.variantName || 'with no Color, Size or Variant_Name';
 
+/** The SKU code segment of a department ("CL") or section ("MEN"): its stored code, else derived from its name. */
+export const departmentCode = (c: { name: string; slug: string; code: string | null }) =>
+  c.code?.toUpperCase() || categoryCode(c.name, c.slug);
+export const sectionCode = (c: { name: string; code: string | null } | null) =>
+  c ? c.code?.toUpperCase() || subcategoryCode(c.name) : subcategoryCode('');
+
 /**
- * Generates SKU_ID and Parent_Product_ID for valid rows without a SKU_ID,
+ * Generates SKU_ID and Parent_Product_ID for valid rows without them,
  * following `GS-<CATEGORY>-<SUBCATEGORY>-<SEQUENCE>` for parents and
  * `<parent>-<COLOR>-<SIZE>` for their variant SKUs.
  *
  * - Rows without a Parent_Product_ID are grouped by category, subcategory,
- *   brand and product name (without its variant part). A group joins this
- *   merchant's existing generated parent of the same name, so re-importing a
- *   sheet never creates the product twice; otherwise it takes the next free
- *   sequence for its prefix.
- * - Rows repeating a variant (same colour and size) of their product, in the
- *   file or in the catalog, are rejected like duplicate SKUs (FR-IM-05).
+ *   brand and product name (without its variant part). A group joins an
+ *   existing generated parent of the same name, so re-importing a sheet never
+ *   creates the product twice; otherwise it takes the next free sequence for
+ *   its prefix.
+ * - A generated row repeating a variant (same colour and size) of its product
+ *   in the file is rejected like a duplicate SKU (FR-IM-05); one repeating a
+ *   variant already in the catalog updates that SKU (FR-IM-09).
  * - A code already taken gets `-2`, `-3`… appended.
  *
  * Must run in the import transaction, holding the code-generation lock.
@@ -44,6 +61,7 @@ export class CodeAssigner {
     private readonly merchantId: string,
     /** Parents the import attaches to, by code; groups joining an existing parent are added. */
     private readonly parents: Map<string, ParentRef>,
+    private readonly options: AssignOptions,
   ) {}
 
   async assign(results: RowResult[]) {
@@ -56,16 +74,18 @@ export class CodeAssigner {
   private group(results: RowResult[]) {
     const groups = new Map<string, Group>();
     for (const r of results) {
-      if (!r.valid || !r.generated) continue;
-      const key = r.parentCode
+      if (!r.valid || !(r.generated || r.parentGenerated)) continue;
+      const key = !r.parentGenerated
         ? `code:${r.parentCode}`
-        : ['name', r.category!.id, norm(r.subcategory), norm(r.brand), norm(r.baseName)].join('|');
+        : this.options.forceNewParent
+          ? 'new'
+          : ['name', r.category!.id, r.subcategory?.id ?? '', norm(r.brand), norm(r.baseName)].join('|');
       let group = groups.get(key);
       if (!group) {
-        const prefix = r.parentCode
-          ? ''
-          : `${SKU_PREFIX}-${categoryCode(r.category!.name, r.category!.slug)}-${subcategoryCode(r.subcategory ?? '')}-`;
-        group = { rows: [], code: r.parentCode, prefix };
+        const prefix = r.parentGenerated
+          ? `${SKU_PREFIX}-${departmentCode(r.category!)}-${sectionCode(r.subcategory)}-`
+          : '';
+        group = { rows: [], code: r.parentGenerated ? '' : r.parentCode, prefix };
         groups.set(key, group);
       }
       group.rows.push(r);
@@ -106,15 +126,17 @@ export class CodeAssigner {
       if (group.code) continue;
       const first = group.rows[0];
       const own = new RegExp(`^${escape(group.prefix)}\\d+$`);
-      const existing = parents.find(
-        (p) =>
-          own.test(p.code) &&
-          !p.deleted &&
-          p.merchantId === this.merchantId &&
-          p.categoryId === first.category!.id &&
-          norm(p.brand) === norm(first.brand) &&
-          norm(p.name) === norm(first.baseName),
-      );
+      const existing = this.options.forceNewParent
+        ? undefined
+        : parents.find(
+            (p) =>
+              own.test(p.code) &&
+              !p.deleted &&
+              (this.options.staff || p.merchantId === this.merchantId) &&
+              p.categoryId === first.category!.id &&
+              norm(p.brand) === norm(first.brand) &&
+              norm(p.name) === norm(first.baseName),
+          );
       if (existing) {
         group.code = existing.code;
         this.parents.set(existing.code, { id: existing.id, categoryId: existing.categoryId });
@@ -130,7 +152,10 @@ export class CodeAssigner {
   private rejectRepeatedVariantsInFile(groups: Group[]) {
     for (const group of groups) {
       const byVariant = new Map<string, RowResult[]>();
-      for (const r of group.rows) byVariant.set(variantKey(r), [...(byVariant.get(variantKey(r)) ?? []), r]);
+      for (const r of group.rows) {
+        if (!r.generated) continue;
+        byVariant.set(variantKey(r), [...(byVariant.get(variantKey(r)) ?? []), r]);
+      }
       for (const rows of byVariant.values()) {
         if (rows.length < 2) continue;
         const list = rows.map((r) => r.row.rowNumber).join(', ');
@@ -149,7 +174,8 @@ export class CodeAssigner {
           select: { sku: true, parentId: true, color: true, size: true, variantName: true, deleted: true },
         })
       : [];
-    const taken = new Set([...variants.map((v) => v.sku), ...results.map((r) => r.sku).filter(Boolean)]);
+    const fileSkus = new Set(results.filter((r) => !r.generated && r.sku).map((r) => r.sku));
+    const taken = new Set([...variants.map((v) => v.sku), ...fileSkus]);
 
     const assigned: RowResult[] = [];
     for (const group of groups) {
@@ -161,10 +187,19 @@ export class CodeAssigner {
         inCatalog.set(key, v.sku);
       }
       for (const r of group.rows) {
-        if (!r.valid) continue;
+        if (!r.valid || !r.generated) continue;
         const existingSku = inCatalog.get(variantKey(r));
         if (existingSku) {
-          r.reject(`Variant '${variantLabel(r)}' of '${group.code}' already exists in the catalog as SKU ${existingSku}`);
+          if (!this.options.allowUpdates) {
+            r.reject(`Variant '${variantLabel(r)}' of '${group.code}' already exists in the catalog as SKU ${existingSku}`);
+          } else if (fileSkus.has(existingSku)) {
+            r.reject(`Variant '${variantLabel(r)}' of '${group.code}' is SKU ${existingSku}, which the file also lists`);
+          } else {
+            // Re-importing a sheet without SKU_IDs updates the variants it created.
+            r.sku = existingSku;
+            r.generated = false;
+            fileSkus.add(existingSku);
+          }
           continue;
         }
         const suffix = [colorCode(r.color ?? ''), sizeCode(r.size ?? '')].filter(Boolean).join('-') ||
@@ -186,12 +221,4 @@ export class CodeAssigner {
       for (const r of pending) r.sku = nextFree(r.sku, taken);
     }
   }
-}
-
-/** `base`, or `base-2`, `base-3`… whichever is not yet taken; marks it taken. */
-function nextFree(base: string, taken: Set<string>): string {
-  let code = base;
-  for (let n = 2; taken.has(code); n++) code = `${base}-${n}`;
-  taken.add(code);
-  return code;
 }

@@ -79,14 +79,16 @@ describe('payment events', () => {
     expect(await fixtures.stockOf(placed.productId)).toBe(10);
   });
 
-  it('a partial refund is logged but changes nothing', async () => {
+  it('a partial refund is recorded without cancelling or restocking', async () => {
     const placed = await placeOrder();
     await orders.confirmPaymentByIntent(placed.intentId, 5000n, 'usd');
     await orders.recordRefundByIntent(placed.intentId, 1000n, 'usd');
+    await orders.recordRefundByIntent(placed.intentId, 1000n, 'usd'); // redelivery — no-op
 
     const order = await reload(placed.orderId);
     expect(order.status).toBe('PAID');
-    expect(order.paymentStatus).toBe('SUCCEEDED');
+    expect(order.paymentStatus).toBe('PARTIALLY_REFUNDED');
+    expect(order.refundedTotal.toFixed(2)).toBe('10.00');
     expect(await fixtures.stockOf(placed.productId)).toBe(8);
   });
 

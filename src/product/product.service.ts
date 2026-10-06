@@ -202,10 +202,22 @@ export class ProductService {
    */
   async findById(id: string, requesterId: string | null, isAdmin: boolean) {
     const product = await this.prisma.product.findFirst({ where: { id, deleted: false }, include: PRODUCT_INCLUDE });
-    if (!product) throw new ProductNotFoundError(id);
+    return this.visibleDetail(product, id, requesterId, isAdmin);
+  }
 
+  /** The PDP by URL slug (NFR-04); same visibility rules as findById. */
+  async findBySlug(slug: string, requesterId: string | null, isAdmin: boolean) {
+    const product = await this.prisma.product.findFirst({
+      where: { urlSlug: slug, deleted: false },
+      include: PRODUCT_INCLUDE,
+    });
+    return this.visibleDetail(product, slug, requesterId, isAdmin);
+  }
+
+  private visibleDetail(product: ProductWithRelations | null, ref: string, requesterId: string | null, isAdmin: boolean) {
+    if (!product) throw new ProductNotFoundError(ref);
     const canSeeUnpublished = isAdmin || product.merchantId === requesterId;
-    if (product.status !== 'ACTIVE' && !canSeeUnpublished) throw new ProductNotFoundError(id);
+    if (product.status !== 'ACTIVE' && !canSeeUnpublished) throw new ProductNotFoundError(ref);
     return toDetail(this.prisma, product, canSeeUnpublished);
   }
 
@@ -226,8 +238,29 @@ export class ProductService {
       this.prisma.product.findMany({ where, include: PRODUCT_INCLUDE, orderBy: orderBy(pageable), ...skipTake(pageable) }),
       this.prisma.product.count({ where }),
     ]);
-    return toPage(rows.map(toSummaryResponse), total, pageable);
+    const sold = await unitsSold(this.prisma, rows.map((r) => r.id));
+    return toPage(rows.map((r) => toSummaryResponse(r, sold.get(r.id) ?? 0)), total, pageable);
   }
+}
+
+/** Order states whose lines count as sold (payment taken, not refunded). */
+const SOLD_STATUSES = ['PAID', 'CONFIRMED', 'SHIPPED', 'DELIVERED'];
+
+/**
+ * Units sold per SKU on paid orders, net of returned units — the popularity
+ * signal for "Best selling" (FR-ST-05). One aggregate for the whole page.
+ */
+export async function unitsSold(db: Db, productIds: string[]): Promise<Map<string, number>> {
+  if (!productIds.length) return new Map();
+  const rows = await db.$queryRaw<{ product_id: string; units: bigint | number | null }[]>`
+    SELECT oi.product_id::text AS product_id, SUM(oi.quantity - oi.returned_quantity) AS units
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    WHERE oi.deleted = false AND o.deleted = false
+      AND o.status = ANY(${SOLD_STATUSES})
+      AND oi.product_id = ANY(${productIds}::uuid[])
+    GROUP BY oi.product_id`;
+  return new Map(rows.map((r) => [r.product_id, Number(r.units ?? 0)]));
 }
 
 /** Detail view with the parent's variant list; unpublished siblings only for privileged callers. */

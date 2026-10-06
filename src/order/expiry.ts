@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import { logger } from '../common/logger';
 import { TX } from '../db';
 import type { PaymentGateway } from '../payment/gateway';
+import { recordOrderEvent } from './order-events';
 import { ORDER_ITEMS_INCLUDE } from './order.mapper';
 import { claimPendingCancellation, restock } from './order.repository';
 
@@ -66,7 +67,12 @@ export class OrderExpiryService {
       if ((await claimPendingCancellation(tx, orderId, 'Expired before payment', 'SYSTEM_EXPIRY')) === 0) {
         return false;
       }
-      await restock(tx, order.items);
+      await restock(tx, order.items, {
+        source: 'CANCELLATION',
+        reason: `Order ${order.orderNumber} expired before payment`,
+        actor: 'SYSTEM',
+      });
+      await recordOrderEvent(tx, orderId, { status: 'CANCELLED', note: 'Expired before payment', actor: 'SYSTEM' });
       log.info(`Expired abandoned order ${order.orderNumber} and released its stock`);
       return true;
     }, TX.checkout);

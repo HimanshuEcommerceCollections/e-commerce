@@ -1,7 +1,7 @@
 import { parse } from 'csv-parse/sync';
 import ExcelJS from 'exceljs';
 import { InvalidImportFileError } from '../../common/errors';
-import { ALL_COLUMNS, ImportRow, keyOf, normalizeHeader } from './columns';
+import { ALL_COLUMNS, ImportRow, keyOf, normalizeHeader, type ImportColumn } from './columns';
 
 export interface UploadedFile {
   originalname: string;
@@ -22,7 +22,8 @@ export interface ParsedFile {
 export class CatalogFileReader {
   constructor(private readonly maxRows: number) {}
 
-  async read(file: UploadedFile | undefined): Promise<ParsedFile> {
+  /** `columns`: the columns whose `requiredColumn` must be in the header (the master template by default). */
+  async read(file: UploadedFile | undefined, columns: ImportColumn[] = ALL_COLUMNS): Promise<ParsedFile> {
     if (!file || file.buffer.length === 0) {
       throw new InvalidImportFileError('The uploaded file is empty');
     }
@@ -40,13 +41,13 @@ export class CatalogFileReader {
     if (table.length === 0) {
       throw new InvalidImportFileError('The file has no header row');
     }
-    return this.toParsedFile(table);
+    return this.toParsedFile(table, columns);
   }
 
-  private toParsedFile(table: { rowNumber: number; cells: string[] }[]): ParsedFile {
+  private toParsedFile(table: { rowNumber: number; cells: string[] }[], columns: ImportColumn[]): ParsedFile {
     const headers = table[0].cells.map(normalizeHeader);
 
-    const missing = ALL_COLUMNS.filter((c) => c.requiredColumn && !headers.includes(keyOf(c))).map((c) => c.header);
+    const missing = columns.filter((c) => c.requiredColumn && !headers.includes(keyOf(c))).map((c) => c.header);
     if (missing.length) {
       throw new InvalidImportFileError(`Missing required columns: ${missing.join(', ')}`);
     }
@@ -61,8 +62,8 @@ export class CatalogFileReader {
       }
       const values = new Map<string, string>();
       headers.forEach((header, i) => {
-        // First occurrence of a repeated header wins.
-        if (i < cells.length && !values.has(header)) values.set(header, cells[i] ?? '');
+        // First occurrence of a repeated header wins; a short row has blanks.
+        if (header !== '' && !values.has(header)) values.set(header, cells[i] ?? '');
       });
       rows.push(new ImportRow(rowNumber, values));
     }

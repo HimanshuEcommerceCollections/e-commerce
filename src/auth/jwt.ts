@@ -35,15 +35,30 @@ export class JwtService {
         exp: Math.floor((nowMs + this.expirationMs) / 1000),
       },
       this.key,
-      { algorithm: this.algorithm, noTimestamp: true },
+      // iat is set above; jsonwebtoken keeps it (noTimestamp would strip it,
+      // and the password-change check needs it).
+      { algorithm: this.algorithm },
     );
   }
 
   /** The token's subject (email), or null if it is malformed, forged or expired. */
   verify(token: string): string | null {
+    return this.verifyClaims(token)?.email ?? null;
+  }
+
+  /** Subject and issue time (whole seconds), or null if the token is malformed, forged or expired. */
+  verifyClaims(token: string): { email: string; issuedAtSeconds: number | null } | null {
     try {
       const payload = jwt.verify(token, this.key, { algorithms: this.accepted });
-      return typeof payload === 'object' && typeof payload.sub === 'string' ? payload.sub : null;
+      if (typeof payload !== 'object' || typeof payload.sub !== 'string') return null;
+      // Tokens minted without iat: their issue time is exp minus the lifetime.
+      const issuedAtSeconds =
+        typeof payload.iat === 'number'
+          ? payload.iat
+          : typeof payload.exp === 'number'
+            ? payload.exp - Math.floor(this.expirationMs / 1000)
+            : null;
+      return { email: payload.sub, issuedAtSeconds };
     } catch {
       return null;
     }

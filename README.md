@@ -19,7 +19,10 @@ npm run build
 npm run migrate                 # apply prisma/migrations (see "Database" below)
 npm start
 # or, for development with reload:  npx tsx src/scripts/migrate.ts && npm run dev
+npm run seed:demo               # optional: demo accounts, the design's sample catalog and orders
 ```
+
+`seed:demo` is idempotent. Accounts: `admin@example.com` / `Admin12345` (admin), `catalog@example.com` / `Catalog12345` (catalog staff), `jordan.m@example.com` / `Customer123` (customer with orders in several states). Product images point at the web client's `public/daylora/` files on `http://localhost:3000`.
 
 Checks:
 
@@ -53,6 +56,7 @@ TEST_DATABASE_URL=postgresql://... npm test   # or point the tests at an empty d
 
 - `0_init` is Flyway V1–V10, verbatim. Some things exist only in that SQL, because Prisma can't express them: five partial unique indexes and the `chk_products_stock_non_negative` CHECK. The race-safety of carts, addresses, primary images and checkout idempotency depends on them. **When you generate a new migration, check it doesn't drop them.**
 - `1_column_defaults` adds DB defaults for Prisma's `@default` fields. It is harmless to the Java server.
+- `2_storefront_operations` adds the taxonomy (department → section, seeded with the 9 frozen departments and 18 sections), catalog template fields, guest orders (`orders.user_id` nullable), fulfilment, shipments, returns, stock movements, analytics events, notifications, password reset, seller applications and support messages. Two more partial unique indexes live only in its SQL: `uniq_orders_guest_idempotency_key` and `uniq_products_url_slug`.
 - `npm run migrate` (`src/scripts/migrate.ts`) runs on every container start:
   - **Fresh database:** applies every migration.
   - **Database built by the Java server with Flyway at V10:** marks `0_init` as already applied, then applies the rest. Tested against a live Flyway-migrated database.
