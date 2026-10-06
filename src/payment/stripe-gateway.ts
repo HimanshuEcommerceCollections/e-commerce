@@ -47,12 +47,13 @@ export class StripePaymentGateway implements PaymentGateway {
     }
   }
 
-  async refund(paymentReference: string, amount: Prisma.Decimal, currency: string): Promise<string> {
+  async refund(paymentReference: string, amount: Prisma.Decimal, currency: string, idempotencyKey?: string): Promise<string> {
     try {
       const refund = await this.stripe.refunds.create(
         { payment_intent: paymentReference, amount: Number(toMinorUnits(amount, currency)) },
-        // At most one full refund per intent, so a retried cancel can't double-refund.
-        { idempotencyKey: `refund-${paymentReference}` },
+        // Default: at most one full refund per intent, so a retried cancel can't
+        // double-refund. Partial refunds (returns) pass a key per return.
+        { idempotencyKey: idempotencyKey ?? `refund-${paymentReference}` },
       );
       return refund.id;
     } catch (e) {

@@ -25,10 +25,13 @@ export interface PaymentGateway {
   initiate(request: PaymentRequest): Promise<PaymentInitiation>;
 
   /**
-   * Refund a captured payment in full; returns the gateway's refund reference.
-   * Throws PaymentGatewayError on failure — callers must then change nothing.
+   * Refund `amount` of a captured payment (all of it, or part for a return);
+   * returns the gateway's refund reference. Throws PaymentGatewayError on
+   * failure — callers must then change nothing.
+   * @param idempotencyKey one key per refund decision, so a retry never pays
+   *        twice; defaults to one key per payment (a single full refund).
    */
-  refund(paymentReference: string, amount: Prisma.Decimal, currency: string): Promise<string>;
+  refund(paymentReference: string, amount: Prisma.Decimal, currency: string, idempotencyKey?: string): Promise<string>;
 
   /**
    * Cancel an uncaptured payment so it can never be confirmed later.
