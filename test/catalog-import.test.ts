@@ -60,7 +60,15 @@ describe('catalog import', () => {
     );
 
     expect(report.errors).toEqual([]);
-    expect(report).toMatchObject({ totalRows: 3, importedRows: 3, parentProductsCreated: 2, ignoredColumns: ['MRP'] });
+    expect(report).toMatchObject({
+      totalRows: 3,
+      importedRows: 3,
+      createdRows: 3,
+      updatedRows: 0,
+      parentProductsCreated: 2,
+      ignoredColumns: [],
+      imagesChecked: false,
+    });
 
     const tee = await variantsOf(parent);
     expect(tee.parent).toMatchObject({ name: 'Crew Tee', brand: 'Nexus', categoryId: clothing.id, merchantId });
@@ -68,6 +76,8 @@ describe('catalog import', () => {
 
     const [black, white] = tee.variants;
     expect(black.price.toFixed(2)).toBe('499.00');
+    expect(black.mrp?.toFixed(2)).toBe('999.00');
+    expect(black.urlSlug).toBe('crew-tee-black-m');
     expect(black).toMatchObject({ stockQuantity: 50, status: 'ACTIVE', color: 'Black', size: 'M', categoryId: clothing.id });
     expect(black.images.map((i) => i.url)).toEqual([img('1'), img('2')]);
     expect(black.images[0].isPrimary).toBe(true);
@@ -122,7 +132,7 @@ describe('catalog import', () => {
     expect(await prisma.product.count({ where: { sku: { in: [sku('NOPRICE'), sku('DUP')] } } })).toBe(0);
   });
 
-  it("a later import adds variants to an existing parent, but not to another merchant's", async () => {
+  it("a later import adds variants to an existing parent and updates it, but not another merchant's", async () => {
     const parent = `GS-CL-${run}`;
     const c = clothing.slug;
     await importCsv(row(sku('A'), parent, 'Tee', '', c, 'ACTIVE', '', '', 'S', '10', '1', '', img('1'), '', ''));
@@ -133,11 +143,12 @@ describe('catalog import', () => {
     );
     expect(second.importedRows).toBe(1);
     expect(second.parentProductsCreated).toBe(0);
+    expect(second.parentProductsUpdated).toBe(1);
     expect(second.errors).toHaveLength(1);
     expect(second.errors[0].reason).toContain('does not match the existing parent product');
 
     const existing = await variantsOf(parent);
-    expect(existing.parent.name).toBe('Tee'); // the existing parent keeps its details
+    expect(existing.parent.name).toBe('Renamed Tee'); // parent content comes from its rows (FR-IM-09)
     expect(existing.variants.map((v) => v.sku)).toEqual([sku('A'), sku('B')]);
 
     const otherMerchant = await importer.importFile(
@@ -155,6 +166,9 @@ describe('catalog import', () => {
       buffer: Buffer.from(`${header}\n${rows.join('\n')}\n`, 'utf8'),
     });
     const category = await fixtures.newCategory(`Widgets ${run}`, `widgets-${run.toLowerCase()}`);
+    for (const name of ['Men', 'Women', 'Kids']) {
+      await prisma.productCategory.create({ data: { name, slug: `${category.slug}-${name.toLowerCase()}`, parentId: category.id } });
+    }
     const cat = categoryCode(category.name, category.slug);
     const c = category.slug;
     const brand = `Brand ${run}`;
@@ -191,7 +205,7 @@ describe('catalog import', () => {
     const { parent } = await variantsOf(men.parentProductId);
     expect(parent).toMatchObject({ name: tee, brand, categoryId: category.id });
 
-    // Re-importing joins the existing parent: known variants are rejected, new ones added.
+    // Re-importing joins the existing parent: known variants are updated (FR-IM-09), new ones added.
     const second = await importer.importFile(
       sheet(
         /* row 2 */ row(`${tee} — Light Blue, L`, brand, c, 'Men', 'Active', 'Light Blue', 'L', '20', '5', img('6')),
@@ -200,15 +214,16 @@ describe('catalog import', () => {
       ),
       merchantId,
     );
-    expect(second.errors).toEqual([
-      {
-        row: 2,
-        sku: null,
-        reason: `Variant 'Light Blue / L' of '${men.parentProductId}' already exists in the catalog as SKU ${men.sku}`,
-      },
-    ]);
-    const [teeBlack, polo] = second.imported;
-    expect(teeBlack).toEqual({ row: 3, sku: `${men.parentProductId}-BLK-M`, parentProductId: men.parentProductId, generated: true });
+    expect(second.errors).toEqual([]);
+    const [teeBlue, teeBlack, polo] = second.imported;
+    expect(teeBlue).toEqual({ row: 2, sku: men.sku, parentProductId: men.parentProductId, generated: false, action: 'UPDATED' });
+    expect(teeBlack).toEqual({
+      row: 3,
+      sku: `${men.parentProductId}-BLK-M`,
+      parentProductId: men.parentProductId,
+      generated: true,
+      action: 'CREATED',
+    });
     expect(polo.parentProductId).toMatch(code('MEN'));
     expect(seq(polo.parentProductId)).toBeGreaterThan(seq(men.parentProductId));
     expect(polo.sku).toBe(`${polo.parentProductId}-BLK-M`);
@@ -269,10 +284,19 @@ describe('catalog import', () => {
 
     // The examples name category 'clothing', which may not exist here; every
     // other check must pass, so that is the only reason given.
-    const report = await importer.importFile({ originalname: 'template.csv', buffer: Buffer.from(template) }, merchantId);
+    // As catalog staff: GS-CL-MEN-001 may already exist from another test file.
+    const report = await importer.importFile({ originalname: 'template.csv', buffer: Buffer.from(template) }, merchantId, {
+      staff: true,
+    });
     expect(report.totalRows).toBe(2);
     for (const e of report.errors) {
       expect(["Unknown category 'clothing'", 'SKU_ID already exists in the catalog']).toContain(e.reason);
+    }
+    // The migrations seed the taxonomy, so the examples import with their attributes.
+    if (report.importedRows) {
+      const { parent } = await variantsOf('GS-CL-MEN-001');
+      expect(parent.attributes).toMatchObject({ Gender: 'Men', Fit: 'Regular' });
+      expect(report.ignoredColumns).toEqual([]);
     }
   });
 });
