@@ -24,6 +24,8 @@ npm run seed:demo               # optional: demo accounts, the design's sample c
 
 `seed:demo` is idempotent. Accounts: `admin@example.com` / `Admin12345` (admin), `catalog@example.com` / `Catalog12345` (catalog staff), `jordan.m@example.com` / `Customer123` (customer with orders in several states). Product images point at the web client's `public/daylora/` files on `http://localhost:3000`.
 
+On Vercel (project `e-commerce-server`): `api/index.ts` exports the Express app and `vercel.json` rewrites every path to it. Set `DATABASE_URL`, `JWT_SECRET`, `CORS_ALLOWED_ORIGINS` and `CRON_SECRET` in the project's Environment Variables, with `SERVER_FORWARD_HEADERS_STRATEGY=framework` (Vercel is a reverse proxy). There is no long-lived process, so the pending-order expiry scan runs from the Vercel cron in `vercel.json`, which calls `/internal/cron/expire-pending` with `Authorization: Bearer $CRON_SECRET`. Vercel caps request bodies at 4.5 MB, so keep `CATALOG_IMPORT_MAX_FILE_SIZE` at or below that there.
+
 Checks:
 
 ```bash

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "npx prisma generate",
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }],
+  "functions": {
+    "api/index.ts": { "maxDuration": 60 }
+  },
+  "crons": [{ "path": "/internal/cron/expire-pending", "schedule": "*/5 * * * *" }]
+}

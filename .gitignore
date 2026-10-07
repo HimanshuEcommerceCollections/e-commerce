@@ -6,3 +6,6 @@ coverage/
 .test-pg/
 .vscode/
 .idea/
+
+### Vercel ###
+.vercel
