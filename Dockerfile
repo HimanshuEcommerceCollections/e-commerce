@@ -33,5 +33,7 @@ EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
   CMD wget -qO- "http://localhost:${SERVER_PORT}/actuator/health/readiness" || exit 1
 
-# Migrate (or adopt a Flyway-built database), then serve.
-CMD ["sh", "-c", "node dist/scripts/migrate.js && exec node dist/server.js"]
+# Migrate (or adopt a Flyway-built database), upsert the SEED_* accounts (a
+# no-op without them), optionally load the demo data (SEED_DEMO=true; each run
+# resets the demo SKUs' prices and stock), then serve.
+CMD ["sh", "-c", "node dist/scripts/migrate.js && node dist/scripts/seed-accounts.js && if [ \"$SEED_DEMO\" = true ]; then node dist/scripts/seed-demo.js; fi && exec node dist/server.js"]

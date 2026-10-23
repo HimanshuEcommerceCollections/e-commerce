@@ -19,10 +19,16 @@ npm run build
 npm run migrate                 # apply prisma/migrations (see "Database" below)
 npm start
 # or, for development with reload:  npx tsx src/scripts/migrate.ts && npm run dev
+npm run seed:accounts           # staff and test logins from SEED_* in .env
 npm run seed:demo               # optional: demo accounts, the design's sample catalog and orders
+npm run demo:csv -- --image-base https://<web-client>/daylora   # the demo catalog as an import file
 ```
 
-`seed:demo` is idempotent. Accounts: `admin@example.com` / `Admin12345` (admin), `catalog@example.com` / `Catalog12345` (catalog staff), `jordan.m@example.com` / `Customer123` (customer with orders in several states). Product images point at the web client's `public/daylora/` files on `http://localhost:3000`.
+`seed:accounts` upserts the logins set by `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`, `SEED_CATALOG_*` and `SEED_CUSTOMER_*` (see `.env.example`), skipping any without both; the Docker image runs it on every start, so the deployment's environment is the source of truth for those passwords.
+
+`demo:csv` writes `demo-catalog.csv` in the import template (one row per SKU, the same codes and slugs as `seed:demo`), for loading a deployed store through `POST /api/catalog/import` or the admin panel. Image URLs must be absolute and reachable, so pass the deployed web client's `/daylora` folder. Category codes come from `DATABASE_URL`, so point it at the target database (or one migrated the same way).
+
+`seed:demo` is idempotent. Accounts come from the `SEED_*` variables when set, otherwise: `admin@example.com` / `Admin12345` (admin), `catalog@example.com` / `Catalog12345` (catalog staff), `jordan.m@example.com` / `Customer123` (customer with orders in several states). Product images point at the web client's `public/daylora/` files on `http://localhost:3000`. In Docker, set `SEED_DEMO=true` to run it on container start (each run resets the demo SKUs' prices and stock), and `DEMO_IMAGE_BASE` (e.g. `https://<web-client>/daylora`) to point the images at a deployed web client.
 
 Checks:
 

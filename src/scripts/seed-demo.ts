@@ -1,11 +1,10 @@
 import 'dotenv/config';
 import { createHash } from 'node:crypto';
-import bcrypt from 'bcryptjs';
-import { Prisma, PrismaClient, type ProductCategory } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { loadConfig } from '../config';
 import { addBusinessDays, lineAmounts, orderTotals, pricingRules } from '../order/pricing';
-import { colorCode, sizeCode } from '../product/importer/sku-codes';
-import { DEMO_PRODUCTS, type DemoProduct } from './demo-catalog';
+import { imageUrls, planDemoCatalog } from './demo-plan';
+import { envAccount, upsertUser, type SeedAccount } from './seed-accounts';
 
 /**
  * Demo data for local development and design review: staff and customer
@@ -18,22 +17,26 @@ import { DEMO_PRODUCTS, type DemoProduct } from './demo-catalog';
  * against production — it resets the demo SKUs' prices and stock.
  *
  *   npm run seed:demo
+ *
+ * The accounts come from SEED_ADMIN_* / SEED_CATALOG_* / SEED_CUSTOMER_* (see
+ * seed-accounts.ts) and fall back to the demo logins below. The Docker image
+ * runs it on start when SEED_DEMO=true. DEMO_IMAGE_BASE points the product
+ * images at a deployed web client (default: local dev server). To load the same
+ * catalog through the importer instead, see demo-catalog-csv.ts.
  */
 
-const IMAGE_BASE = 'http://localhost:3000/daylora';
+const IMAGE_BASE = process.env.DEMO_IMAGE_BASE ?? 'http://localhost:3000/daylora';
 const DAY = 86_400_000;
 
-const ACCOUNTS = {
-  admin: { email: 'admin@example.com', password: 'Admin12345', fullName: 'Store Admin', role: 'ROLE_ADMIN' },
-  catalog: { email: 'catalog@example.com', password: 'Catalog12345', fullName: 'Catalog Team', role: 'ROLE_CATALOG' },
+const ACCOUNTS: Record<'admin' | 'catalog' | 'customer', SeedAccount> = {
+  admin: envAccount('ADMIN') ?? { email: 'admin@example.com', password: 'Admin12345', fullName: 'Store Admin', role: 'ROLE_ADMIN' },
+  catalog: envAccount('CATALOG') ?? { email: 'catalog@example.com', password: 'Catalog12345', fullName: 'Catalog Team', role: 'ROLE_CATALOG' },
   customer: {
-    email: 'jordan.m@example.com',
-    password: 'Customer123',
+    ...(envAccount('CUSTOMER') ?? { email: 'jordan.m@example.com', password: 'Customer123', role: 'ROLE_CUSTOMER' }),
     fullName: 'Jordan Miller',
-    role: 'ROLE_CUSTOMER',
     phoneNumber: '+15035550142',
   },
-} as const;
+};
 
 const JORDAN_ADDRESS = {
   label: 'Home',
@@ -47,231 +50,48 @@ const JORDAN_ADDRESS = {
   country: 'US',
 };
 
-/** Sales tax by department (percent); groceries and books untaxed in this demo. */
-const TAX_RATE: Record<string, string> = {
-  Clothing: '6.00',
-  Electronics: '8.00',
-  'Home & Kitchen': '7.25',
-  Grocery: '0.00',
-  'Beauty & Personal Care': '7.25',
-  'Books & Stationery': '0.00',
-  'Toys & Kids': '6.50',
-  'Sports & Fitness': '6.50',
-  Lifestyle: '7.00',
-};
-
-/** Design attribute keys → attribute sheet names. */
-const ATTRIBUTE_NAMES: Record<string, string> = {
-  fit: 'Fit',
-  material: 'Material',
-  conn: 'Connectivity',
-  diet: 'Dietary',
-  skin: 'Skin & hair type',
-  format: 'Format',
-  age: 'Age',
-  activity: 'Activity',
-  occasion: 'Occasion',
-};
-
-const FEATURED_COUNT = 12;
-
-const slugify = (t: string) =>
-  t
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .replace(/&/g, 'and')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
-
-/** A photo from the design for products that have none of their own. */
-function fallbackImage(x: DemoProduct): string {
-  const byType: Record<string, string> = {
-    'Jackets & coats': 'denim-jacket',
-    Jeans: 'pdp-denim-3',
-    Bottoms: 'pdp-denim-3',
-    Activewear: 'sneakers',
-    'Headphones & earbuds': 'headphones',
-    Speakers: 'smart-hub',
-    'Smart home': 'smart-hub',
-    Wearables: 'earbuds',
-    'Phone cases & chargers': 'usb-hub',
-    'Keyboards & mice': 'keyboard',
-    'Cables & hubs': 'usb-hub',
-    'Laptop accessories': 'laptop-stand',
-    Cookware: 'cookware',
-    'Small appliances': 'blender',
-    'Coffee & tea makers': 'coffee-maker',
-    'Kitchen tools': 'room-kitchen',
-    Lighting: 'lamp',
-    'Bedding & bath': 'room-bedroom',
-    'Yoga & pilates': 'yoga-mat',
-    'Gift sets': 'promo-new',
-    Seasonal: 'promo-new',
-    'Party supplies': 'promo-new',
-    'Bags & travel': 'room-outdoor',
-  };
-  const byDept: Record<string, string> = {
-    Clothing: 'promo-deals',
-    Electronics: 'laptop',
-    'Home & Kitchen': 'room-living',
-    Grocery: 'room-kitchen',
-    'Beauty & Personal Care': 'skincare',
-    'Books & Stationery': 'room-workspace',
-    'Toys & Kids': 'room-kids',
-    'Sports & Fitness': x.g === 'Outdoors' ? 'room-outdoor' : 'yoga-mat',
-    Lifestyle: 'room-living',
-  };
-  return byType[x.type] ?? byDept[x.dept] ?? 'hero';
-}
-
-function galleryOf(x: DemoProduct): string[] {
-  if (x.img === 'pdp-denim-1') return [1, 2, 3, 4].map((i) => `${IMAGE_BASE}/pdp-denim-${i}.jpg`);
-  return [`${IMAGE_BASE}/${x.img ?? fallbackImage(x)}.jpg`];
-}
-
-function attributesOf(x: DemoProduct): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (x.dept === 'Clothing') out.Gender = x.g;
-  for (const [key, value] of Object.entries(x.a)) {
-    const v = Array.isArray(value) ? value.join(', ') : value;
-    if (v) out[ATTRIBUTE_NAMES[key] ?? key] = v;
-  }
-  return out;
-}
-
-/** Spread the product's stock over its variants; the remainder goes to the first ones. */
-function spread(total: number, n: number): number[] {
-  const base = Math.floor(total / n);
-  return Array.from({ length: n }, (_, i) => base + (i < total % n ? 1 : 0));
-}
-
-function descriptions(x: DemoProduct, attrs: Record<string, string>) {
-  const detail = Object.entries(attrs)
-    .filter(([k]) => k !== 'Gender')
-    .map(([k, v]) => `${k.toLowerCase()}: ${v}`)
-    .join('; ');
-  const short = `${x.name} by ${x.brand}${detail ? ` — ${detail}` : ''}.`;
-  const long =
-    `${x.name} from ${x.brand}, part of our ${x.type.toLowerCase()} range. ` +
-    (x.colors.length > 1 ? `Available in ${x.colors.join(', ')}. ` : '') +
-    'Ships from our Portland warehouse; free standard shipping on orders of $35 or more and 30-day returns.';
-  const features = [
-    ...Object.entries(attrs).filter(([k]) => k !== 'Gender').map(([k, v]) => `${k}: ${v}`),
-    x.sizes.length ? `Sizes ${x.sizes[0]}–${x.sizes[x.sizes.length - 1]}` : null,
-    '30-day returns',
-  ].filter(Boolean);
-  return { short, long, features: features.join('\n') };
-}
-
-async function upsertUser(prisma: PrismaClient, a: { email: string; password: string; fullName: string; role: string; phoneNumber?: string }) {
-  const password = await bcrypt.hash(a.password, 10);
-  return prisma.user.upsert({
-    where: { email: a.email },
-    update: { password, fullName: a.fullName, role: a.role, enabled: true, accountNonLocked: true, deleted: false },
-    create: { email: a.email, password, fullName: a.fullName, role: a.role, phoneNumber: a.phoneNumber ?? null },
-  });
-}
-
 async function seedCatalog(prisma: PrismaClient, merchantId: string) {
-  const categories = await prisma.productCategory.findMany({ where: { deleted: false } });
-  const dept = (name: string) => {
-    const c = categories.find((x) => !x.parentId && x.name === name);
-    if (!c) throw new Error(`Department '${name}' not found — run the migrations first`);
-    return c;
-  };
-  const section = (d: ProductCategory, name: string) => {
-    const c = categories.find((x) => x.parentId === d.id && x.name.toLowerCase() === name.toLowerCase());
-    if (!c) throw new Error(`Section '${name}' of '${d.name}' not found — run the migrations first`);
-    return c;
-  };
-
-  const featured = new Set(
-    [...DEMO_PRODUCTS].filter((x) => x.stock > 0).sort((a, b) => b.pop - a.pop).slice(0, FEATURED_COUNT),
-  );
-  const seenSlugs = new Set<string>();
-  const sequence = new Map<string, number>();
-  const now = Date.now();
+  const plan = planDemoCatalog(await prisma.productCategory.findMany({ where: { deleted: false } }));
   let skus = 0;
 
-  for (const [index, x] of DEMO_PRODUCTS.entries()) {
-    const d = dept(x.dept);
-    const s = section(d, x.g);
-    const seq = (sequence.get(s.id) ?? 0) + 1;
-    sequence.set(s.id, seq);
-    const code = `GS-${d.code}-${s.code}-${String(seq).padStart(3, '0')}`;
-
-    let slug = slugify(x.name);
-    if (seenSlugs.has(slug)) slug = slugify(`${x.brand} ${x.name}`);
-    seenSlugs.add(slug);
-
-    const attrs = attributesOf(x);
-    const text = descriptions(x, attrs);
-    const createdAt = new Date(x.isNew ? now - ((index % 12) + 1) * DAY : now - (45 + (index % 90)) * DAY);
+  for (const p of plan) {
     const parentData = {
-      name: x.name,
-      brand: x.brand,
-      shortDescription: text.short,
-      description: text.long,
-      categoryId: d.id,
-      subcategoryId: s.id,
-      productType: x.type,
-      keyFeatures: text.features,
-      warranty: x.dept === 'Electronics' ? '1-year limited manufacturer warranty' : null,
-      usageInstructions: x.dept === 'Clothing' ? 'Machine wash cold with like colors; tumble dry low.' : null,
-      attributes: attrs,
-      featured: featured.has(x),
+      name: p.name,
+      brand: p.brand,
+      shortDescription: p.shortDescription,
+      description: p.description,
+      categoryId: p.department.id,
+      subcategoryId: p.section.id,
+      productType: p.productType,
+      keyFeatures: p.keyFeatures,
+      warranty: p.warranty,
+      usageInstructions: p.usageInstructions,
+      attributes: p.attributes,
+      featured: p.featured,
       merchantId,
       deleted: false,
-      createdAt,
+      createdAt: p.createdAt,
     };
     const parent = await prisma.parentProduct.upsert({
-      where: { code },
+      where: { code: p.code },
       update: parentData,
-      create: { code, ...parentData },
+      create: { code: p.code, ...parentData },
     });
+    const gallery = imageUrls(IMAGE_BASE, p.images);
 
-    // Clothing with no sizes listed (sold out in the design) still gets the full run, at zero stock.
-    const sizes = x.dept === 'Clothing' && x.sizes.length === 0 ? ['XS', 'S', 'M', 'L', 'XL', 'XXL'] : x.sizes;
-    const colors: (string | null)[] = x.colors.length ? x.colors : [null];
-    const combos = colors.flatMap((color) => (sizes.length ? sizes : [null]).map((size) => ({ color, size })));
-    const stock = spread(x.stock, combos.length);
-    const defaultIndex = Math.max(0, stock.findIndex((q) => q > 0));
-    const gallery = galleryOf(x);
-
-    for (const [i, { color, size }] of combos.entries()) {
-      const suffix = [color && colorCode(color), size && sizeCode(size)].filter(Boolean).join('-');
-      const sku = suffix ? `${code}-${suffix}` : code;
-      const urlSlug = i === defaultIndex ? slug : `${slug}-${suffix.toLowerCase()}`;
-      const variantName = [color, size].filter(Boolean).join(' / ') || null;
-      const price = new Prisma.Decimal(x.price.toFixed(2));
+    for (const v of p.variants) {
+      const { sku, stock, ...fields } = v;
       const data = {
-        name: x.name,
-        description: text.long,
-        price,
-        mrp: x.was === null ? null : new Prisma.Decimal(x.was.toFixed(2)),
-        cost: price.mul('0.55').toDecimalPlaces(2),
-        taxCode: `${d.code}-STD`,
-        taxRate: new Prisma.Decimal(TAX_RATE[x.dept] ?? '0.00'),
-        stockQuantity: stock[i],
+        ...fields,
+        name: p.name,
+        description: p.description,
+        stockQuantity: stock,
         status: 'ACTIVE',
-        categoryId: d.id,
+        categoryId: p.department.id,
         parentId: parent.id,
         merchantId,
-        variantName,
-        color,
-        size,
-        material: attrs.Material ?? null,
-        urlSlug,
-        seoTitle: `${x.name} | ${x.brand}`,
-        metaDescription: text.short.slice(0, 500),
-        searchKeywords: [x.brand, x.type, x.g, ...x.colors, x.dept].join(', '),
-        specifications: Object.entries(attrs).map(([k, v]) => `${k}: ${v}`).join('\n') || null,
-        shippingClass: 'STANDARD',
-        supplierId: `SUP-${slugify(x.brand).toUpperCase().slice(0, 12)}`,
-        warehouseId: 'WH-PDX-01',
         deleted: false,
-        createdAt,
+        createdAt: p.createdAt,
       };
       const product = await prisma.product.upsert({
         where: { sku },
@@ -284,7 +104,7 @@ async function seedCatalog(prisma: PrismaClient, merchantId: string) {
         data: gallery.map((url, position) => ({
           productId: product.id,
           url,
-          altText: `${x.name}${variantName ? ` — ${variantName}` : ''}`,
+          altText: `${p.name}${v.variantName ? ` — ${v.variantName}` : ''}`,
           position,
           isPrimary: position === 0,
           checkStatus: 'OK',
@@ -294,7 +114,7 @@ async function seedCatalog(prisma: PrismaClient, merchantId: string) {
       skus++;
     }
   }
-  return { parents: DEMO_PRODUCTS.length, skus };
+  return { parents: plan.length, skus };
 }
 
 // ── Orders ────────────────────────────────────────────────────────────────
@@ -514,6 +334,9 @@ async function seedOrders(prisma: PrismaClient, customerId: string) {
   return { created, total: plans.length };
 }
 
+/** The password, unless it came from the environment (never logged). */
+const shown = (kind: string, a: SeedAccount) => (process.env[`SEED_${kind}_PASSWORD`] ? `(SEED_${kind}_PASSWORD)` : a.password);
+
 async function main() {
   const { databaseUrl } = loadConfig({ JWT_SECRET: 'x'.repeat(32), ...process.env });
   const prisma = new PrismaClient({ datasourceUrl: databaseUrl });
@@ -531,9 +354,9 @@ async function main() {
     const orders = await seedOrders(prisma, customer.id);
 
     console.log(`Demo data ready:
-  accounts  ${ACCOUNTS.admin.email} / ${ACCOUNTS.admin.password} (admin)
-            ${ACCOUNTS.catalog.email} / ${ACCOUNTS.catalog.password} (catalog)
-            ${ACCOUNTS.customer.email} / ${ACCOUNTS.customer.password} (customer)
+  accounts  ${ACCOUNTS.admin.email} / ${shown('ADMIN', ACCOUNTS.admin)} (admin)
+            ${ACCOUNTS.catalog.email} / ${shown('CATALOG', ACCOUNTS.catalog)} (catalog)
+            ${ACCOUNTS.customer.email} / ${shown('CUSTOMER', ACCOUNTS.customer)} (customer)
   catalog   ${catalog.parents} products, ${catalog.skus} SKUs
   orders    ${orders.created} created (${orders.total - orders.created} already present)`);
   } finally {
