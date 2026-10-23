@@ -14,6 +14,8 @@
     "migrate": "node dist/scripts/migrate.js",
     "migrate:dev": "tsx src/scripts/migrate.ts",
     "seed:demo": "tsx src/scripts/seed-demo.ts",
+    "seed:accounts": "tsx src/scripts/seed-accounts.ts",
+    "demo:csv": "tsx src/scripts/demo-catalog-csv.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "prisma:generate": "prisma generate",

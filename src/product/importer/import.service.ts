@@ -92,6 +92,13 @@ export interface ImportOptions {
   mode?: 'upsert' | 'create';
   /** Write nothing unless every row is valid (Add product). */
   atomic?: boolean;
+  /**
+   * Validate and plan only (seller submissions): codes are assigned and the
+   * report lists what would import, but nothing is written and images aren't checked.
+   */
+  dryRun?: boolean;
+  /** Existing SKUs keep their stock level (approved seller edits: stock has its own path). */
+  keepStock?: boolean;
 }
 
 type Existing = Prisma.ProductGetPayload<{ include: { parent: true; images: true } }>;
@@ -260,14 +267,15 @@ export class CatalogImportService {
         }
         await loadExisting(tx, results);
         await assignSlugs(tx, results);
-        if (!writable()) return [0, 0];
-        return save(tx, results.filter((r) => r.valid), parents, merchantId, `${options.actor ?? ''}`.trim() || null, fileName);
+        if (!writable() || options.dryRun) return [0, 0];
+        const actor = `${options.actor ?? ''}`.trim() || null;
+        return save(tx, results.filter((r) => r.valid), parents, merchantId, actor, fileName, options.keepStock ?? false);
       }, TX.catalogImport);
     }
     // Nothing was written when an atomic import has an invalid row.
     const valid = writable() ? results.filter((r) => r.valid).sort((a, b) => a.row.rowNumber - b.row.rowNumber) : [];
 
-    const imageErrors = await this.checkImages(valid);
+    const imageErrors = options.dryRun ? [] : await this.checkImages(valid);
 
     const errors = results
       .filter((r) => !r.valid)
@@ -801,6 +809,7 @@ async function save(
   merchantId: string,
   actor: string | null,
   fileName: string,
+  keepStock: boolean,
 ): Promise<[number, number]> {
   if (!valid.length) return [0, 0];
   const parentIds = new Map(knownParents);
@@ -857,9 +866,9 @@ async function save(
       r.productId = e.id;
       await tx.product.update({
         where: { id: e.id },
-        data: { ...content, stockQuantity: r.quantity!, version: { increment: 1 } },
+        data: { ...content, ...(keepStock ? {} : { stockQuantity: r.quantity! }), version: { increment: 1 } },
       });
-      if (r.quantity! !== e.stockQuantity) {
+      if (!keepStock && r.quantity! !== e.stockQuantity) {
         movements.push({ productId: e.id, delta: r.quantity! - e.stockQuantity, quantityAfter: r.quantity!, source: 'IMPORT', reason, actor });
       }
       if (!sameUrls(e.images.map((i) => i.url), r.imageUrls)) {

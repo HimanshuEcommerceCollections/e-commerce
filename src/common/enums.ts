@@ -55,7 +55,8 @@ export type ReturnRequester = (typeof RETURN_REQUESTERS)[number];
 export const SHIPPING_METHODS = ['STANDARD', 'EXPRESS'] as const;
 export type ShippingMethod = (typeof SHIPPING_METHODS)[number];
 
-export const STOCK_MOVEMENT_SOURCES = ['ADJUSTMENT', 'BULK_UPDATE', 'IMPORT', 'RETURN', 'ORDER', 'CANCELLATION'] as const;
+/** SELLER: a seller's own stock update, applied without review and audited here. */
+export const STOCK_MOVEMENT_SOURCES = ['ADJUSTMENT', 'BULK_UPDATE', 'IMPORT', 'RETURN', 'ORDER', 'CANCELLATION', 'SELLER'] as const;
 export type StockMovementSource = (typeof STOCK_MOVEMENT_SOURCES)[number];
 
 /** PURCHASE is server-written when an order becomes PAID; the rest come from the browser. */
@@ -76,6 +77,7 @@ export const NOTIFICATION_TEMPLATES = [
   'ACCOUNT_CREATED',
   'SUPPORT_TICKET',
   'SELLER_APPLICATION',
+  'SUBMISSION_UPDATE',
 ] as const;
 export type NotificationTemplate = (typeof NOTIFICATION_TEMPLATES)[number];
 
@@ -84,3 +86,25 @@ export type NotificationStatus = (typeof NOTIFICATION_STATUSES)[number];
 
 export const IMAGE_CHECK_STATUSES = ['OK', 'BROKEN', 'UNCHECKED'] as const;
 export type ImageCheckStatus = (typeof IMAGE_CHECK_STATUSES)[number];
+
+/** product_submissions.kind: a new product, a change to a live one, or taking one off sale. */
+export const SUBMISSION_KINDS = ['NEW_PRODUCT', 'EDIT', 'DELIST'] as const;
+export type SubmissionKind = (typeof SUBMISSION_KINDS)[number];
+
+/** product_submissions.status. The first three are open; a product has at most one open submission. */
+export const SUBMISSION_STATUSES = ['SUBMITTED', 'IN_REVIEW', 'CHANGES_REQUESTED', 'APPROVED', 'REJECTED', 'WITHDRAWN'] as const;
+export type SubmissionStatus = (typeof SUBMISSION_STATUSES)[number];
+export const OPEN_SUBMISSION_STATUSES = ['SUBMITTED', 'IN_REVIEW', 'CHANGES_REQUESTED'] as const satisfies readonly SubmissionStatus[];
+
+/** What the seller sees for a product (seller portal flow, page 2). */
+export const LISTING_STATES = [
+  'DRAFT',
+  'SUBMITTED',
+  'IN_REVIEW',
+  'CHANGES_REQUESTED',
+  'LIVE',
+  'CHANGE_PENDING',
+  'SUSPENDED',
+  'ARCHIVED',
+] as const;
+export type ListingState = (typeof LISTING_STATES)[number];

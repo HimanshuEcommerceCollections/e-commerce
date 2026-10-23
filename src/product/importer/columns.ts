@@ -124,4 +124,9 @@ export class ImportRow {
   hasKey(key: string): boolean {
     return this.values.has(key);
   }
+
+  /** Every cell by normalized header, as given (seller submissions store rows this way). */
+  toRecord(): Record<string, string> {
+    return Object.fromEntries(this.values);
+  }
 }

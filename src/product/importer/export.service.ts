@@ -87,6 +87,16 @@ export class CatalogExportService {
     };
   }
 
+  /** The live template row of each SKU, by SKU (the "before" of a seller edit), with all its attributes. */
+  async records(skus: string[]): Promise<Map<string, Record<string, string>>> {
+    if (!skus.length) return new Map();
+    const products = await this.prisma.product.findMany({
+      where: { sku: { in: skus }, deleted: false, parent: { deleted: false } },
+      include: EXPORT_INCLUDE,
+    });
+    return new Map(products.map((p) => [p.sku, this.record(p, Object.keys(attributesOf(p.parent.attributes)))]));
+  }
+
   private record(p: ExportProduct, attributeNames: string[]): Record<string, string> {
     const parent = p.parent;
     const assigned = parent.category ?? p.category;

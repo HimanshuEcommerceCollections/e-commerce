@@ -195,6 +195,24 @@ export class PaymentAmountMismatchError extends Error {
   }
 }
 
+// ── seller portal ───────────────────────────────────────────────────────────
+export class SubmissionNotFoundError extends DomainError {
+  constructor(ref: string) {
+    super(notFound, `Submission not found: ${ref}`);
+  }
+}
+/** Sellers change the catalog only through review (seller portal). */
+export class SellerReviewRequiredError extends DomainError {
+  constructor() {
+    super(403, 'Sellers submit products and changes for review: use /api/seller/submissions');
+  }
+}
+export class InvalidSubmissionStateError extends DomainError {
+  constructor(message: string) {
+    super(conflict, message);
+  }
+}
+
 // ── generic ─────────────────────────────────────────────────────────────────
 /** Concurrent write lost an optimistic-lock race (was ObjectOptimisticLockingFailureException). */
 export class ConcurrentUpdateError extends DomainError {

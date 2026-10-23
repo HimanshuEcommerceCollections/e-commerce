@@ -5,6 +5,7 @@ import { authRateLimit } from './auth/rate-limit';
 import { errorHandler, notFoundHandler } from './common/error-handler';
 import type { Container } from './container';
 import { adminCatalogRoutes } from './admin/catalog.routes';
+import { adminSubmissionRoutes, sellerRoutes } from './seller/seller.routes';
 import { adminOpsRoutes } from './admin/ops.routes';
 import { catalogRoutes } from './product/catalog.routes';
 import {
@@ -74,6 +75,8 @@ export function createApp(c: Container): Express {
   // Admin-only operations first: their per-route guards let catalog paths fall through.
   app.use('/api/admin', adminOpsRoutes(c));
   app.use('/api/admin', adminCatalogRoutes(c));
+  app.use('/api/admin', adminSubmissionRoutes(c));
+  app.use('/api/seller', sellerRoutes(c));
 
   app.use(notFoundHandler);
   app.use(errorHandler);

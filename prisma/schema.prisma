@@ -6,7 +6,8 @@
 // live only in migration SQL and must never be dropped by a later migration:
 //   * partial unique indexes: uniq_user_addresses_default, uniq_product_images_primary,
 //     uniq_orders_user_idempotency_key, uniq_carts_user_live, uniq_cart_items_cart_product_live
-//     (0_init); uniq_orders_guest_idempotency_key, uniq_products_url_slug (2_storefront_operations)
+//     (0_init); uniq_orders_guest_idempotency_key, uniq_products_url_slug (2_storefront_operations);
+//     uniq_product_submissions_open_parent (3_seller_portal)
 //   * CHECK chk_products_stock_non_negative
 // Review every generated migration for DROP INDEX / DROP CONSTRAINT on these.
 //
@@ -44,6 +45,8 @@ model User {
   orders              Order[]
   notifications       Notification[]
   passwordResetTokens PasswordResetToken[]
+  submissions         ProductSubmission[]  @relation("SubmissionMerchant")
+  reviews             ProductSubmission[]  @relation("SubmissionReviewer")
 
   @@map("users")
 }
@@ -101,7 +104,8 @@ model ParentProduct {
   category          ProductCategory? @relation("ParentProductCategory", fields: [categoryId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_parent_products_category")
   subcategory       ProductCategory? @relation("ParentProductSubcategory", fields: [subcategoryId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_parent_products_subcategory")
 
-  variants Product[]
+  variants    Product[]
+  submissions ProductSubmission[]
 
   @@index([categoryId], map: "idx_parent_products_category_id")
   @@index([subcategoryId], map: "idx_parent_products_subcategory_id")
@@ -513,6 +517,57 @@ model SellerApplication {
 
   @@index([status, createdAt], map: "idx_seller_applications_status")
   @@map("seller_applications")
+}
+
+/// Seller portal: one seller change awaiting the catalog team (3_seller_portal).
+/// At most one open (SUBMITTED | IN_REVIEW | CHANGES_REQUESTED) per parent
+/// product: uniq_product_submissions_open_parent, SQL only.
+model ProductSubmission {
+  id              String                   @id @default(uuid()) @db.Uuid
+  createdAt       DateTime                 @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime                 @updatedAt @map("updated_at") @db.Timestamptz(6)
+  reference       String                   @unique(map: "uk_product_submissions_reference") @db.VarChar(20)
+  merchantId      String                   @map("merchant_id") @db.Uuid
+  parentProductId String                   @map("parent_product_id") @db.Uuid
+  /// NEW_PRODUCT | EDIT | DELIST
+  kind            String                   @db.VarChar(20)
+  /// SUBMITTED | IN_REVIEW | CHANGES_REQUESTED | APPROVED | REJECTED | WITHDRAWN
+  status          String                   @db.VarChar(20)
+  /// UPLOAD | FORM
+  source          String                   @db.VarChar(10)
+  fileName        String?                  @map("file_name") @db.VarChar(255)
+  sellerNote      String?                  @map("seller_note") @db.VarChar(2000)
+  /// NEW_PRODUCT: {requestedStatus: {sku: status}}; EDIT: {headers, rows} (template rows, normalized keys).
+  payload         Json                     @default("{}")
+  reviewerId      String?                  @map("reviewer_id") @db.Uuid
+  reviewNote      String?                  @map("review_note") @db.VarChar(2000)
+  submittedAt     DateTime                 @map("submitted_at") @db.Timestamptz(6)
+  reviewStartedAt DateTime?                @map("review_started_at") @db.Timestamptz(6)
+  decidedAt       DateTime?                @map("decided_at") @db.Timestamptz(6)
+  merchant        User                     @relation("SubmissionMerchant", fields: [merchantId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_submissions_merchant")
+  reviewer        User?                    @relation("SubmissionReviewer", fields: [reviewerId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_submissions_reviewer")
+  parentProduct   ParentProduct            @relation(fields: [parentProductId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_submissions_parent")
+  events          ProductSubmissionEvent[]
+
+  @@index([status, submittedAt], map: "idx_product_submissions_status")
+  @@index([merchantId, createdAt], map: "idx_product_submissions_merchant")
+  @@index([parentProductId], map: "idx_product_submissions_parent")
+  @@map("product_submissions")
+}
+
+/// The submission's history: every status change, who made it and their note.
+model ProductSubmissionEvent {
+  id           String            @id @default(uuid()) @db.Uuid
+  createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  submissionId String            @map("submission_id") @db.Uuid
+  status       String            @db.VarChar(20)
+  actorId      String?           @map("actor_id") @db.Uuid
+  actorEmail   String?           @map("actor_email") @db.VarChar(255)
+  note         String?           @db.VarChar(2000)
+  submission   ProductSubmission @relation(fields: [submissionId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_submission_events_submission")
+
+  @@index([submissionId, createdAt], map: "idx_product_submission_events_submission")
+  @@map("product_submission_events")
 }
 
 model SupportMessage {

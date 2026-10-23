@@ -17,10 +17,10 @@ const upload = (token: string, filename: string, content: string | Buffer) =>
     .attach('file', Buffer.from(content), filename);
 
 describe('catalog import over HTTP', () => {
-  it('a merchant imports a file and the PDP lists only published variants publicly', async () => {
+  it('catalog staff import a file and the PDP lists only published variants publicly', async () => {
     const run = randomUUID().slice(0, 8).toUpperCase();
     const category = await fixtures.newCategory(`Home ${run}`, `home-${run.toLowerCase()}`);
-    const merchant = await fixtures.registerUser('ROLE_MERCHANT');
+    const merchant = await fixtures.registerUser('ROLE_CATALOG');
     const parent = `GS-HK-${run}`;
     const p = `T-${run}`;
     const csv = [
@@ -45,9 +45,16 @@ describe('catalog import over HTTP', () => {
     expect(detail.color).toBe('Red');
     expect(detail.variants).toHaveLength(1);
 
-    // The owner sees the draft variant too.
+    // Catalog staff see the draft variant too.
     const owner = await request(app).get(`/api/products/${summary.id}`).set('Authorization', `Bearer ${merchant}`);
     expect(owner.body.data.variants).toHaveLength(2);
+  });
+
+  it('sellers submit for review instead of importing', async () => {
+    const seller = await fixtures.registerUser('ROLE_MERCHANT');
+    const res = await upload(seller, 'catalog.csv', 'SKU_ID\n');
+    expect(res.status).toBe(403);
+    expect(res.body.message).toBe('Sellers submit products and changes for review: use /api/seller/submissions');
   });
 
   it('customers cannot import', async () => {
@@ -58,7 +65,7 @@ describe('catalog import over HTTP', () => {
   });
 
   it('bad uploads are 4xx in the API envelope', async () => {
-    const merchant = await fixtures.registerUser('ROLE_MERCHANT');
+    const merchant = await fixtures.registerUser('ROLE_CATALOG');
 
     const wrongColumns = await upload(merchant, 'catalog.csv', 'SKU_ID\nA\n');
     expect(wrongColumns.status).toBe(400);
@@ -86,7 +93,7 @@ describe('catalog import over HTTP', () => {
 });
 
 describe('products API contract', () => {
-  it('create, update and page JSON match the Java server', async () => {
+  it('sellers no longer write products directly; the page JSON matches the Java server', async () => {
     const run = randomUUID().slice(0, 8);
     const merchant = await fixtures.registerUser('ROLE_MERCHANT');
     const admin = await fixtures.registerUser('ROLE_ADMIN');
@@ -96,42 +103,23 @@ describe('products API contract', () => {
     expect(cat.status).toBe(201);
     expect(cat.body.message).toBe('Category created successfully');
 
-    const created = await request(app)
-      .post('/api/products')
-      .set(auth(merchant))
-      .send({
-        name: 'Robot',
-        price: 1299,
-        stockQuantity: 5,
-        sku: `ROBOT-${run}-RED`,
-        categoryId: cat.body.data.id,
-        parentProductCode: `ROBOT-${run}`,
-        brand: 'Botco',
-        color: 'Red',
-        images: [{ url: 'https://cdn.test.local/r1.jpg' }, { url: 'https://cdn.test.local/r2.jpg', primary: true }],
-      });
-    expect(created.status).toBe(201);
-    // Money keeps two decimals, as Jackson wrote BigDecimal(12,2).
-    expect(created.text).toContain('"price":1299.00');
-    const product = created.body.data;
-    expect(product).toMatchObject({ status: 'DRAFT', parent: { code: `ROBOT-${run}`, brand: 'Botco' } });
-    expect(product.images.map((i: { primary: boolean }) => i.primary)).toEqual([false, true]);
+    const robot = { name: 'Robot', price: 1299, stockQuantity: 5, sku: `ROBOT-${run}-RED`, categoryId: cat.body.data.id };
+    const createdRes = await request(app).post('/api/products').set(auth(merchant)).send(robot);
+    expect(createdRes.status).toBe(403);
+    expect(createdRes.body.message).toBe('Sellers submit products and changes for review: use /api/seller/submissions');
+    const id = randomUUID();
+    expect((await request(app).put(`/api/products/${id}`).set(auth(merchant)).send({ price: 1 })).status).toBe(403);
+    expect((await request(app).delete(`/api/products/${id}`).set(auth(merchant))).status).toBe(403);
 
-    // A second variant under the same parent.
-    const blue = await request(app)
-      .post('/api/products')
-      .set(auth(merchant))
-      .send({ name: 'Robot', price: '1299.00', stockQuantity: 1, sku: `ROBOT-${run}-BLU`, parentProductCode: `ROBOT-${run}`, color: 'Blue' });
-    expect(blue.status).toBe(201);
-    expect(blue.body.data.category.id).toBe(cat.body.data.id); // inherited from the parent
-    expect(blue.body.data.variants).toHaveLength(2);
-
-    const updated = await request(app)
-      .put(`/api/products/${product.id}`)
-      .set(auth(merchant))
-      .send({ status: 'ACTIVE', price: 999.5 });
-    expect(updated.status).toBe(200);
-    expect(updated.text).toContain('"price":999.50');
+    // Validation still comes first, in Spring order.
+    const invalid = await request(app).post('/api/products').set(auth(merchant)).send({ price: -1 });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.data).toMatchObject({
+      name: 'must not be blank',
+      price: 'must be greater than 0',
+      stockQuantity: 'must not be null',
+      sku: 'must not be blank',
+    });
 
     const page = await request(app).get('/api/products?size=1&sort=createdAt,desc');
     expect(page.body.data).toMatchObject({
@@ -142,21 +130,5 @@ describe('products API contract', () => {
       pageable: { pageNumber: 0, pageSize: 1, paged: true },
       sort: { sorted: true },
     });
-
-    const invalid = await request(app).post('/api/products').set(auth(merchant)).send({ price: -1 });
-    expect(invalid.status).toBe(400);
-    expect(invalid.body.data).toMatchObject({
-      name: 'must not be blank',
-      price: 'must be greater than 0',
-      stockQuantity: 'must not be null',
-      sku: 'must not be blank',
-    });
-
-    const dupe = await request(app)
-      .post('/api/products')
-      .set(auth(merchant))
-      .send({ name: 'Robot', price: 1, stockQuantity: 1, sku: `ROBOT-${run}-RED` });
-    expect(dupe.status).toBe(409);
-    expect(dupe.body.message).toBe(`A product with SKU 'ROBOT-${run}-RED' already exists`);
   });
 });
