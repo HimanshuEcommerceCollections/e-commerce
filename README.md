@@ -46,6 +46,7 @@ TEST_DATABASE_URL=postgresql://... npm test   # or point the tests at an empty d
 | `src/product/` | Categories, products (parent product + variant SKUs), `importer/` (catalog bulk import) |
 | `src/cart/`, `src/order/` | Cart, checkout, cancellation, payment-event handling, pending-order expiry |
 | `src/payment/` | Gateway interface, manual and Stripe gateways, webhook store and service |
+| `src/seller/` | Seller portal: submissions, the review queue and seller stock |
 | `prisma/` | Schema and migrations |
 | `test/` | Vitest integration tests against a real Postgres |
 | `postman/` | Postman collection, environment and a sample import file |
@@ -57,11 +58,41 @@ TEST_DATABASE_URL=postgresql://... npm test   # or point the tests at an empty d
 - `0_init` is Flyway V1–V10, verbatim. Some things exist only in that SQL, because Prisma can't express them: five partial unique indexes and the `chk_products_stock_non_negative` CHECK. The race-safety of carts, addresses, primary images and checkout idempotency depends on them. **When you generate a new migration, check it doesn't drop them.**
 - `1_column_defaults` adds DB defaults for Prisma's `@default` fields. It is harmless to the Java server.
 - `2_storefront_operations` adds the taxonomy (department → section, seeded with the 9 frozen departments and 18 sections), catalog template fields, guest orders (`orders.user_id` nullable), fulfilment, shipments, returns, stock movements, analytics events, notifications, password reset, seller applications and support messages. Two more partial unique indexes live only in its SQL: `uniq_orders_guest_idempotency_key` and `uniq_products_url_slug`.
+- `3_seller_portal` adds `product_submissions` and their event history. One partial unique index lives only in its SQL: `uniq_product_submissions_open_parent` (one open submission per product).
 - `npm run migrate` (`src/scripts/migrate.ts`) runs on every container start:
   - **Fresh database:** applies every migration.
   - **Database built by the Java server with Flyway at V10:** marks `0_init` as already applied, then applies the rest. Tested against a live Flyway-migrated database.
   - **Flyway below V10:** stops with an error. Bring the database to V10 with the Java server first.
 - Stock and order state changes are guarded SQL `UPDATE`s in `src/order/order.repository.ts`, as in the Java server (NFR-08). Don't rewrite them as read-then-write.
+
+## Seller portal
+
+Sellers (`ROLE_MERCHANT`) change the catalog only through review. Their direct writes (`POST/PUT/DELETE /api/products`, `POST /api/catalog/import`) now answer 403.
+
+| Seller (`/api/seller`) | |
+|---|---|
+| `POST /submissions` | Bulk upload (multipart `file`, optional `note`) or form rows (JSON `{rows, note}`), in the import template's columns |
+| `GET /submissions`, `GET /submissions/:ref`, `POST /submissions/:ref/withdraw` | The seller's submissions, with the reviewer's notes |
+| `GET /products` | The seller's products and their state: `DRAFT`, `SUBMITTED`, `IN_REVIEW`, `CHANGES_REQUESTED`, `LIVE`, `CHANGE_PENDING`, `SUSPENDED`, `ARCHIVED` |
+| `POST /products/:id/submit`, `POST /products/:id/delist` | Send a saved draft for review; ask to take a live product off sale |
+| `POST /stock` | `{items: [{sku, quantity}]}`, applied at once without review |
+| `GET /template` | The import template |
+
+| Catalog team (`/api/admin`, admins and `ROLE_CATALOG`) | |
+|---|---|
+| `GET /submissions`, `GET /submissions/counts` | The queue: open submissions, oldest first; filter by `status`, `kind`, `merchantId` |
+| `GET /submissions/:ref` | Before and after per SKU, and the history |
+| `POST /submissions/:ref/claim`, `/approve`, `/request-changes`, `/reject` | Decisions. Request changes and reject need a `note` |
+| `GET /seller-stock-alerts?days=7` | Seller stock that dropped to zero |
+
+How it works:
+
+- **Automated checks** run first: the importer's validation as a dry run (fields, categories, duplicate SKUs, ownership) and image URL checks. Failing rows are rejected with per-row errors; the rest carry on.
+- **A product not yet live** is written as `DRAFT` SKUs, so its codes are reserved and customers can't see it. A `NEW_PRODUCT` submission asks for each SKU's `Product_Status` on approval. A row with `Product_Status` `DRAFT` is saved without being submitted.
+- **A change to a live product** never touches it. The rows wait in an `EDIT` submission, and the reviewer sees a field-by-field diff against the live row. Approval imports them as the seller, leaving stock alone.
+- **Stock applies at once**, under row locks, as a `SELLER` stock movement. A drop to zero is logged and listed in the stock alerts.
+- **Uploading again** while a submission waits, or after changes were requested, updates that submission. While a reviewer has it, the upload is rejected.
+- Every decision is mailed to the seller (log-only mailer).
 
 ## Differences from the Java server
 

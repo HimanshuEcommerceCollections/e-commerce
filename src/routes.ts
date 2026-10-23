@@ -8,6 +8,7 @@ import {
 } from './auth/auth.service';
 import { CartItemSchema, CartItemUpdateSchema, CartLinesBodySchema } from './cart/cart.service';
 import { created, noContent, ok } from './common/api-response';
+import { SellerReviewRequiredError } from './common/errors';
 import { ORDER_STATUSES } from './common/enums';
 import { parsePageable } from './common/pagination';
 import { parseBody, pathUuid, ValidationError } from './common/validation';
@@ -100,20 +101,22 @@ export function productRoutes(c: Container): Router {
     const user = req.user;
     res.json(ok(await c.products.findById(pathUuid(req.params.id), user?.id ?? null, isCatalogStaff(user))));
   });
+  // Seller portal: sellers no longer write here; every change goes through
+  // review at /api/seller/submissions. Validation and the role check keep
+  // their Spring order, so other callers get the answers they always did.
   r.post('/', async (req, res) => {
-    const input = parseBody(ProductCreateSchema, req.body);
-    const data = await c.products.create(input, assertRole(req, 'ROLE_MERCHANT').id);
-    res.status(201).json(created(data, 'Product listed successfully'));
+    parseBody(ProductCreateSchema, req.body);
+    assertRole(req, 'ROLE_MERCHANT');
+    throw new SellerReviewRequiredError();
   });
-  r.put('/:id', async (req, res) => {
-    const id = pathUuid(req.params.id);
-    const input = parseBody(ProductUpdateSchema, req.body);
-    const data = await c.products.update(id, input, assertRole(req, 'ROLE_MERCHANT').id);
-    res.json(ok(data, 'Product updated successfully'));
+  r.put('/:id', async (req) => {
+    pathUuid(req.params.id);
+    parseBody(ProductUpdateSchema, req.body);
+    assertRole(req, 'ROLE_MERCHANT');
+    throw new SellerReviewRequiredError();
   });
-  r.delete('/:id', requireRole('ROLE_MERCHANT'), async (req, res) => {
-    await c.products.softDelete(pathUuid(req.params.id), currentUser(req).id);
-    res.json(noContent('Product removed successfully'));
+  r.delete('/:id', requireRole('ROLE_MERCHANT'), async () => {
+    throw new SellerReviewRequiredError();
   });
   return r;
 }

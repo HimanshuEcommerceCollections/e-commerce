@@ -2,15 +2,15 @@ import express, { Router } from 'express';
 import multer from 'multer';
 import { currentUser, requireAuth, requireRole } from '../auth/auth.middleware';
 import { ok } from '../common/api-response';
-import { DomainError } from '../common/errors';
+import { DomainError, SellerReviewRequiredError } from '../common/errors';
 import { ValidationError } from '../common/validation';
 import type { Container } from '../container';
 import { CATALOG_ROLES } from '../routes';
 import { templateCsv } from './importer/template';
 
 /**
- * Catalog files (FR-IM-01..12, NFR-06): import (merchants import their own
- * products; catalog staff manage every product), the template, bulk price and
+ * Catalog files (FR-IM-01..12, NFR-06): import (catalog staff; sellers submit
+ * through /api/seller/submissions for review), the template, bulk price and
  * stock updates, and the export.
  */
 export function catalogRoutes(c: Container): Router {
@@ -31,9 +31,13 @@ export function catalogRoutes(c: Container): Router {
     return req.file;
   };
   const anyCatalogUser = [requireAuth, requireRole('ROLE_MERCHANT', ...CATALOG_ROLES)];
+  const sellersSubmitForReview: express.RequestHandler = (req, _res, next) => {
+    if (currentUser(req).role === 'ROLE_MERCHANT') throw new SellerReviewRequiredError();
+    next();
+  };
   const staffOnly = [requireAuth, requireRole(...CATALOG_ROLES)];
 
-  r.post('/import', ...anyCatalogUser, multipart, upload.single('file'), async (req, res) => {
+  r.post('/import', requireAuth, sellersSubmitForReview, requireRole(...CATALOG_ROLES), multipart, upload.single('file'), async (req, res) => {
     const file = fileOf(req);
     const user = currentUser(req);
     const report = await c.catalogImport.importFile(file, user.id, { staff: isStaff(user.role), actor: user.email });

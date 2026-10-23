@@ -25,6 +25,7 @@ import { CatalogExportService } from './product/importer/export.service';
 import { ImageCheckService } from './product/image-check';
 import { pricingRules } from './order/pricing';
 import { ProductService } from './product/product.service';
+import { SellerSubmissionService } from './seller/submission.service';
 import { ManualShippingProvider } from './shipping/manual-provider';
 import type { ShippingProvider } from './shipping/shipping-provider';
 import { SupportService } from './support/support.service';
@@ -56,6 +57,8 @@ export interface Container {
   imageChecks: ImageCheckService;
   /** Admin catalog: products, variants, inventory, images (FR-AD-01/03/05). */
   catalogAdmin: CatalogAdminService;
+  /** Seller portal: submissions, review decisions and seller stock. */
+  submissions: SellerSubmissionService;
   cart: CartService;
   orders: OrderService;
   /** Admin operations: orders, fulfilment, shipping, cancellation (FR-AD-02/04, FR-IN-03/04). */
@@ -100,6 +103,7 @@ export function createContainer(
   const catalogReader = new CatalogFileReader(config.catalogImport.maxRows);
   const imageChecks = new ImageCheckService(prisma, config.imageChecks);
   const catalogImport = new CatalogImportService(prisma, catalogReader, imageChecks, config.order.currency);
+  const catalogExport = new CatalogExportService(prisma, config.order.currency);
 
   return {
     config,
@@ -115,9 +119,10 @@ export function createContainer(
     products: new ProductService(prisma),
     catalogImport,
     catalogUpdates: new CatalogBulkUpdateService(prisma, catalogReader),
-    catalogExport: new CatalogExportService(prisma, config.order.currency),
+    catalogExport,
     imageChecks,
     catalogAdmin: new CatalogAdminService(prisma, catalogImport, imageChecks, config.inventory.lowStockThreshold),
+    submissions: new SellerSubmissionService(prisma, catalogReader, catalogImport, catalogExport, imageChecks, mailer, config),
     cart: new CartService(prisma, pricingRules(config), config.order.currency),
     orders,
     adminOrders: new AdminOrderService(prisma, gateway, orders, shipping, mailer, config),

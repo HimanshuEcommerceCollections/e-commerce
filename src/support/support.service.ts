@@ -1,7 +1,7 @@
 import { randomInt } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
-import { isIntegrityViolation } from '../common/error-handler';
+import { withUniqueReference } from '../common/reference';
 import { optionalString, requiredString } from '../common/validation';
 import type { Config } from '../config';
 import type { Mailer } from '../notify/mailer';
@@ -129,16 +129,5 @@ export class SupportService {
         `Your reference is ${row.reference}. Our team will review your application and get back to you.`,
     });
     return { reference: row.reference };
-  }
-}
-
-/** Short random references; the unique index decides, and a clash just draws again. */
-async function withUniqueReference<T>(next: () => string, insert: (ref: string) => Promise<T>): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await insert(next());
-    } catch (e) {
-      if (!isIntegrityViolation(e) || attempt >= 9) throw e;
-    }
   }
 }
