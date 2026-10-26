@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client';
-import type { PaymentStatus } from '../common/enums';
+import type { PaymentMethodType, PaymentStatus } from '../common/enums';
 
 /** Gateway-agnostic charge instruction (primitives only — payment never depends on order). */
 export interface PaymentRequest {
@@ -49,6 +49,56 @@ export interface PaymentGateway {
 
   /** Whether an admin may mark payment by hand (manual only — never override a real provider). */
   supportsManualConfirmation(): boolean;
+
+  /**
+   * Saved cards ("Payment methods" in the account), when the provider can
+   * vault them; null or absent when it can't (manual). Card numbers never
+   * reach the server: the browser confirms a SetupIntent with the provider.
+   */
+  readonly savedPaymentMethods?: SavedPaymentMethodVault | null;
+
+  /**
+   * How a succeeded payment was made, for the order's "Visa •••• 4242" line.
+   * Optional: a gateway without it leaves the order's payment method empty.
+   */
+  describePayment?(paymentReference: string): Promise<PaymentMethodDetails | null>;
+}
+
+/** orders.payment_method_type / card_brand / card_last4. */
+export interface PaymentMethodDetails {
+  type: PaymentMethodType;
+  /** visa, mastercard, amex, discover, … (cards and wallets only). */
+  brand: string | null;
+  last4: string | null;
+}
+
+/** A vaulted payment method as the provider reports it. */
+export interface VaultedPaymentMethod {
+  id: string;
+  /** Provider customer it is attached to; null when not attached yet. */
+  customerId: string | null;
+  /** CARD | PAYPAL | ... */
+  type: string;
+  brand: string | null;
+  last4: string | null;
+  expMonth: number | null;
+  expYear: number | null;
+  holderName: string | null;
+  email: string | null;
+}
+
+/** Provider-side customer and card vault (Stripe customers + SetupIntents). Errors throw PaymentGatewayError. */
+export interface SavedPaymentMethodVault {
+  /** Provider name stored on saved_payment_methods.provider. */
+  readonly provider: string;
+  createCustomer(input: { email: string; name: string; userId: string }): Promise<string>;
+  /** A SetupIntent for the customer; returns its client secret. */
+  createSetupIntent(customerId: string): Promise<string>;
+  /** null when the provider doesn't know the id. */
+  retrievePaymentMethod(paymentMethodId: string): Promise<VaultedPaymentMethod | null>;
+  attachPaymentMethod(paymentMethodId: string, customerId: string): Promise<void>;
+  setDefaultPaymentMethod(customerId: string, paymentMethodId: string): Promise<void>;
+  detachPaymentMethod(paymentMethodId: string): Promise<void>;
 }
 
 /**

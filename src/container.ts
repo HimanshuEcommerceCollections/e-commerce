@@ -1,6 +1,20 @@
 import type { PrismaClient } from '@prisma/client';
+import { BuyAgainService } from './account/buy-again.service';
+import { GiftCardService } from './account/gift-cards.service';
+import { NotificationPrefsService } from './account/notification-prefs.service';
+import { PaymentMethodService } from './account/payment-methods.service';
+import { PrivacyService } from './account/privacy.service';
+import { SessionService } from './account/sessions.service';
+import { StoreCreditService } from './account/store-credit.service';
+import { TwoFactorService } from './account/two-factor.service';
+import { CustomerReturnService } from './account/returns.service';
+import { ReviewService } from './account/reviews.service';
+import { SavedItemService } from './account/saved-items.service';
+import { AccountSummaryService } from './account/summary.service';
 import { CatalogAdminService } from './admin/catalog.service';
 import { AdminCustomerService } from './admin/customers.service';
+import { AdminInboxService } from './admin/inbox.service';
+import { AdminPromotionService } from './admin/promotions.service';
 import { AdminOrderService } from './admin/orders.service';
 import { AdminReportService } from './admin/reports.service';
 import { AdminReturnService } from './admin/returns.service';
@@ -8,6 +22,8 @@ import { AnalyticsService } from './analytics/analytics.service';
 import { AuthService } from './auth/auth.service';
 import { JwtService } from './auth/jwt';
 import { CartService } from './cart/cart.service';
+import { PromotionService } from './promo/promotion.service';
+import { StorefrontService } from './product/storefront.service';
 import { Mailer } from './notify/mailer';
 import type { Config } from './config';
 import { OrderExpiryService } from './order/expiry';
@@ -48,6 +64,10 @@ export interface Container {
   analytics: AnalyticsService;
   categories: CategoryService;
   products: ProductService;
+  /** Promo codes (contract B1). */
+  promotions: PromotionService;
+  /** Server-side PLP search, facets, related items, recommendations, suggestions (contract A). */
+  storefront: StorefrontService;
   catalogImport: CatalogImportService;
   /** Bulk price/stock/status updates (FR-IM-10). */
   catalogUpdates: CatalogBulkUpdateService;
@@ -61,12 +81,26 @@ export interface Container {
   submissions: SellerSubmissionService;
   cart: CartService;
   orders: OrderService;
+  /** Account home tiles (contract C1). */
+  accountSummary: AccountSummaryService;
+  /** Saved items / hearts (C5). */
+  savedItems: SavedItemService;
+  /** The customer's returns list (C3). */
+  customerReturns: CustomerReturnService;
+  /** Buy again (C4). */
+  buyAgain: BuyAgainService;
+  /** Product reviews: customer, public and moderation (C6). */
+  reviews: ReviewService;
   /** Admin operations: orders, fulfilment, shipping, cancellation (FR-AD-02/04, FR-IN-03/04). */
   adminOrders: AdminOrderService;
   /** Returns and refunds (FR-AD-07). */
   adminReturns: AdminReturnService;
   /** Customer records and staff roles (FR-AD-06/08). */
   adminCustomers: AdminCustomerService;
+  /** Support messages and seller applications inbox (contract D1). */
+  adminInbox: AdminInboxService;
+  /** Promotion codes CRUD (contract D3). */
+  adminPromotions: AdminPromotionService;
   /** Analytics summary, sales report, settings. */
   adminReports: AdminReportService;
   /** SHIPPING_PROVIDER (manual only for now). */
@@ -77,6 +111,18 @@ export interface Container {
   mailer: Mailer;
   /** Present only when PAYMENT_PROVIDER=stripe. */
   stripeWebhook: StripeWebhookService | null;
+  // ── Account settings (contract C8–C13) ──
+  /** Signed-in devices (user_sessions). */
+  sessions: SessionService;
+  /** 2-step verification codes (log-only "SMS"). */
+  twoFactor: TwoFactorService;
+  notificationPrefs: NotificationPrefsService;
+  storeCredit: StoreCreditService;
+  giftCards: GiftCardService;
+  /** Saved cards; 501 unless the gateway has a vault (Stripe). */
+  paymentMethods: PaymentMethodService;
+  /** Data export and account deletion. */
+  privacy: PrivacyService;
 }
 
 export function createContainer(
@@ -98,12 +144,19 @@ export function createContainer(
   const mailer = new Mailer(prisma, config.mail.provider);
   const analytics = new AnalyticsService(prisma);
   const orders = new OrderService(prisma, gateway, config, { mailer, analytics });
-  const auth = new AuthService(prisma, jwt, config, mailer);
+  const sessions = new SessionService(prisma, Math.max(config.jwt.expirationMs, config.jwt.rememberExpirationMs));
+  const twoFactor = new TwoFactorService(prisma, mailer, config.store.name);
+  const auth = new AuthService(prisma, jwt, config, mailer, sessions, twoFactor);
+  const paymentMethods = new PaymentMethodService(prisma, gateway);
   const shipping: ShippingProvider = new ManualShippingProvider();
   const catalogReader = new CatalogFileReader(config.catalogImport.maxRows);
   const imageChecks = new ImageCheckService(prisma, config.imageChecks);
   const catalogImport = new CatalogImportService(prisma, catalogReader, imageChecks, config.order.currency);
   const catalogExport = new CatalogExportService(prisma, config.order.currency);
+  const promotions = new PromotionService(prisma);
+  const cart = new CartService(prisma, pricingRules(config), config.order.currency, promotions);
+  const savedItems = new SavedItemService(prisma, cart);
+  const customerReturns = new CustomerReturnService(prisma, config);
 
   return {
     config,
@@ -112,22 +165,31 @@ export function createContainer(
     gateway,
     auth,
     addresses: new AddressService(prisma, config.address.maxPerUser),
-    accounts: new AccountService(prisma, auth),
+    accounts: new AccountService(prisma, auth, sessions),
     support: new SupportService(prisma, mailer, config),
     analytics,
     categories: new CategoryService(prisma),
     products: new ProductService(prisma),
+    promotions,
+    storefront: new StorefrontService(prisma, config.inventory.lowStockThreshold),
     catalogImport,
     catalogUpdates: new CatalogBulkUpdateService(prisma, catalogReader),
     catalogExport,
     imageChecks,
     catalogAdmin: new CatalogAdminService(prisma, catalogImport, imageChecks, config.inventory.lowStockThreshold),
     submissions: new SellerSubmissionService(prisma, catalogReader, catalogImport, catalogExport, imageChecks, mailer, config),
-    cart: new CartService(prisma, pricingRules(config), config.order.currency),
+    cart,
     orders,
+    accountSummary: new AccountSummaryService(prisma, orders, customerReturns, savedItems),
+    savedItems,
+    customerReturns,
+    buyAgain: new BuyAgainService(prisma),
+    reviews: new ReviewService(prisma, config, mailer),
     adminOrders: new AdminOrderService(prisma, gateway, orders, shipping, mailer, config),
     adminReturns: new AdminReturnService(prisma, gateway, mailer, config),
     adminCustomers: new AdminCustomerService(prisma),
+    adminInbox: new AdminInboxService(prisma),
+    adminPromotions: new AdminPromotionService(prisma),
     adminReports: new AdminReportService(prisma, gateway, config),
     shipping,
     expiry: new OrderExpiryService(prisma, gateway, config.order.pendingExpiryMinutes),
@@ -141,5 +203,12 @@ export function createContainer(
           config.payment.stripe.inflightLeaseSeconds,
         )
       : null,
+    sessions,
+    twoFactor,
+    notificationPrefs: new NotificationPrefsService(prisma),
+    storeCredit: new StoreCreditService(prisma, config),
+    giftCards: new GiftCardService(prisma, mailer, config),
+    paymentMethods,
+    privacy: new PrivacyService(prisma, mailer, config, sessions, paymentMethods),
   };
 }

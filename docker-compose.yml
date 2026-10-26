@@ -39,6 +39,8 @@ services:
         required: false
     # These take precedence over .env: inside the network the database is "db".
     environment:
+      # A DATABASE_URL in .env (for running outside Docker) would win over DB_*.
+      DATABASE_URL: postgresql://${DB_USERNAME:-postgres}:${DB_PASSWORD:-postgres}@db:5432/${DB_NAME:-nexus_commerce}
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${DB_NAME:-nexus_commerce}

@@ -24,29 +24,44 @@ datasource db {
 }
 
 model User {
-  id                String    @id @default(uuid()) @db.Uuid
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
-  deleted           Boolean   @default(false)
-  email             String    @unique(map: "uk_users_email") @db.VarChar(255)
-  password          String    @db.VarChar(255)
-  role              String    @db.VarChar(20)
-  enabled           Boolean   @default(true)
-  accountNonLocked  Boolean   @default(true) @map("account_non_locked")
-  lastLoginAt       DateTime? @map("last_login_at") @db.Timestamptz(6)
-  fullName          String    @map("full_name") @db.VarChar(200)
-  phoneNumber       String?   @unique(map: "uk_users_phone") @map("phone_number") @db.VarChar(20)
-  marketingOptIn    Boolean   @default(false) @map("marketing_opt_in")
+  id                  String    @id @default(uuid()) @db.Uuid
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted             Boolean   @default(false)
+  email               String    @unique(map: "uk_users_email") @db.VarChar(255)
+  password            String    @db.VarChar(255)
+  role                String    @db.VarChar(20)
+  enabled             Boolean   @default(true)
+  accountNonLocked    Boolean   @default(true) @map("account_non_locked")
+  lastLoginAt         DateTime? @map("last_login_at") @db.Timestamptz(6)
+  fullName            String    @map("full_name") @db.VarChar(200)
+  phoneNumber         String?   @unique(map: "uk_users_phone") @map("phone_number") @db.VarChar(20)
+  marketingOptIn      Boolean   @default(false) @map("marketing_opt_in")
   /// Tokens issued before this instant are rejected (password change signs out other devices).
-  passwordChangedAt DateTime? @map("password_changed_at") @db.Timestamptz(6)
+  passwordChangedAt   DateTime? @map("password_changed_at") @db.Timestamptz(6)
+  /// MM-DD, optional ("We'll send you a treat on your birthday").
+  birthday            String?   @db.VarChar(5)
+  storeCreditBalance  Decimal   @default(0) @map("store_credit_balance") @db.Decimal(12, 2)
+  stripeCustomerId    String?   @map("stripe_customer_id") @db.VarChar(255)
+  twoFactorEnabled    Boolean   @default(false) @map("two_factor_enabled")
+  twoFactorPhone      String?   @map("two_factor_phone") @db.VarChar(20)
+  deletionRequestedAt DateTime? @map("deletion_requested_at") @db.Timestamptz(6)
 
   carts               Cart[]
   addresses           UserAddress[]
   orders              Order[]
   notifications       Notification[]
   passwordResetTokens PasswordResetToken[]
-  submissions         ProductSubmission[]  @relation("SubmissionMerchant")
-  reviews             ProductSubmission[]  @relation("SubmissionReviewer")
+  submissions         ProductSubmission[]     @relation("SubmissionMerchant")
+  reviews             ProductSubmission[]     @relation("SubmissionReviewer")
+  productReviews      ProductReview[]
+  savedItems          SavedItem[]
+  notificationPrefs   NotificationPreference?
+  storeCreditEntries  StoreCreditEntry[]
+  paymentMethods      SavedPaymentMethod[]
+  sessions            UserSession[]
+  otpChallenges       OtpChallenge[]
+  dataExports         DataExportRequest[]
 
   @@map("users")
 }
@@ -101,11 +116,15 @@ model ParentProduct {
   /// Category attribute sheet values, e.g. {"Fit":"Slim"}.
   attributes        Json             @default("{}")
   featured          Boolean          @default(false)
+  /// Rollup of PUBLISHED reviews, recomputed on publish/reject/delete.
+  ratingAvg         Decimal          @default(0) @map("rating_avg") @db.Decimal(3, 2)
+  ratingCount       Int              @default(0) @map("rating_count")
   category          ProductCategory? @relation("ParentProductCategory", fields: [categoryId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_parent_products_category")
   subcategory       ProductCategory? @relation("ParentProductSubcategory", fields: [subcategoryId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_parent_products_subcategory")
 
   variants    Product[]
   submissions ProductSubmission[]
+  reviews     ProductReview[]
 
   @@index([categoryId], map: "idx_parent_products_category_id")
   @@index([subcategoryId], map: "idx_parent_products_subcategory_id")
@@ -159,6 +178,8 @@ model Product {
   images         ProductImage[]
   cartItems      CartItem[]
   stockMovements StockMovement[]
+  savedBy        SavedItem[]
+  reviews        ProductReview[]
 
   @@index([parentId], map: "idx_products_parent_id")
   @@map("products")
@@ -242,48 +263,60 @@ model UserAddress {
 
 /// A placed order — a self-contained historical record (prices, names, address snapshotted).
 model Order {
-  id                   String    @id @default(uuid()) @db.Uuid
-  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
-  deleted              Boolean   @default(false)
+  id                   String     @id @default(uuid()) @db.Uuid
+  createdAt            DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted              Boolean    @default(false)
   /// Null for a guest order (the customer is identified by customerEmail).
-  userId               String?   @map("user_id") @db.Uuid
-  orderNumber          String    @unique(map: "uk_orders_order_number") @map("order_number") @db.VarChar(40)
-  status               String    @db.VarChar(30)
-  currency             String    @db.VarChar(3)
-  subtotal             Decimal   @db.Decimal(12, 2)
-  taxTotal             Decimal   @map("tax_total") @db.Decimal(12, 2)
-  shippingTotal        Decimal   @map("shipping_total") @db.Decimal(12, 2)
-  discountTotal        Decimal   @map("discount_total") @db.Decimal(12, 2)
-  grandTotal           Decimal   @map("grand_total") @db.Decimal(12, 2)
-  paymentStatus        String?   @map("payment_status") @db.VarChar(20)
-  paymentReference     String?   @map("payment_reference") @db.VarChar(255)
-  paymentIntentId      String?   @map("payment_intent_id") @db.VarChar(255)
-  shipRecipientName    String    @map("ship_recipient_name") @db.VarChar(200)
-  shipPhone            String?   @map("ship_phone") @db.VarChar(20)
-  shipAddressLine1     String    @map("ship_address_line1") @db.VarChar(255)
-  shipAddressLine2     String?   @map("ship_address_line2") @db.VarChar(255)
-  shipCity             String    @map("ship_city") @db.VarChar(100)
-  shipState            String    @map("ship_state") @db.VarChar(100)
-  shipPostalCode       String    @map("ship_postal_code") @db.VarChar(20)
-  shipCountry          String    @map("ship_country") @db.VarChar(100)
-  idempotencyKey       String?   @map("idempotency_key") @db.VarChar(80)
-  requestHash          String?   @map("request_hash") @db.VarChar(64)
-  cancellationReason   String?   @map("cancellation_reason") @db.VarChar(255)
-  cancelledBy          String?   @map("cancelled_by") @db.VarChar(20)
-  lastPaymentFailureAt DateTime? @map("last_payment_failure_at") @db.Timestamptz(6)
-  customerEmail        String?   @map("customer_email") @db.VarChar(255)
-  marketingOptIn       Boolean   @default(false) @map("marketing_opt_in")
+  userId               String?    @map("user_id") @db.Uuid
+  orderNumber          String     @unique(map: "uk_orders_order_number") @map("order_number") @db.VarChar(40)
+  status               String     @db.VarChar(30)
+  currency             String     @db.VarChar(3)
+  subtotal             Decimal    @db.Decimal(12, 2)
+  taxTotal             Decimal    @map("tax_total") @db.Decimal(12, 2)
+  shippingTotal        Decimal    @map("shipping_total") @db.Decimal(12, 2)
+  discountTotal        Decimal    @map("discount_total") @db.Decimal(12, 2)
+  grandTotal           Decimal    @map("grand_total") @db.Decimal(12, 2)
+  paymentStatus        String?    @map("payment_status") @db.VarChar(20)
+  paymentReference     String?    @map("payment_reference") @db.VarChar(255)
+  paymentIntentId      String?    @map("payment_intent_id") @db.VarChar(255)
+  shipRecipientName    String     @map("ship_recipient_name") @db.VarChar(200)
+  shipPhone            String?    @map("ship_phone") @db.VarChar(20)
+  shipAddressLine1     String     @map("ship_address_line1") @db.VarChar(255)
+  shipAddressLine2     String?    @map("ship_address_line2") @db.VarChar(255)
+  shipCity             String     @map("ship_city") @db.VarChar(100)
+  shipState            String     @map("ship_state") @db.VarChar(100)
+  shipPostalCode       String     @map("ship_postal_code") @db.VarChar(20)
+  shipCountry          String     @map("ship_country") @db.VarChar(100)
+  idempotencyKey       String?    @map("idempotency_key") @db.VarChar(80)
+  requestHash          String?    @map("request_hash") @db.VarChar(64)
+  cancellationReason   String?    @map("cancellation_reason") @db.VarChar(255)
+  cancelledBy          String?    @map("cancelled_by") @db.VarChar(20)
+  lastPaymentFailureAt DateTime?  @map("last_payment_failure_at") @db.Timestamptz(6)
+  customerEmail        String?    @map("customer_email") @db.VarChar(255)
+  marketingOptIn       Boolean    @default(false) @map("marketing_opt_in")
   /// SHA-256 (hex) of the guest's order token; the token itself is never stored.
-  guestTokenHash       String?   @map("guest_token_hash") @db.VarChar(64)
+  guestTokenHash       String?    @map("guest_token_hash") @db.VarChar(64)
   /// UNFULFILLED | PICKED | PACKED | SHIPPED | DELIVERED; null until paid.
-  fulfilmentStatus     String?   @map("fulfilment_status") @db.VarChar(20)
-  shippingMethod       String?   @map("shipping_method") @db.VarChar(20)
-  refundedTotal        Decimal   @default(0) @map("refunded_total") @db.Decimal(12, 2)
-  paidAt               DateTime? @map("paid_at") @db.Timestamptz(6)
-  shippedAt            DateTime? @map("shipped_at") @db.Timestamptz(6)
-  deliveredAt          DateTime? @map("delivered_at") @db.Timestamptz(6)
-  user                 User?     @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_orders_user")
+  fulfilmentStatus     String?    @map("fulfilment_status") @db.VarChar(20)
+  shippingMethod       String?    @map("shipping_method") @db.VarChar(20)
+  refundedTotal        Decimal    @default(0) @map("refunded_total") @db.Decimal(12, 2)
+  paidAt               DateTime?  @map("paid_at") @db.Timestamptz(6)
+  shippedAt            DateTime?  @map("shipped_at") @db.Timestamptz(6)
+  deliveredAt          DateTime?  @map("delivered_at") @db.Timestamptz(6)
+  promoCode            String?    @map("promo_code") @db.VarChar(40)
+  promotionId          String?    @map("promotion_id") @db.Uuid
+  /// Σ (MRP − price) × qty at checkout ("You saved").
+  savingsTotal         Decimal    @default(0) @map("savings_total") @db.Decimal(12, 2)
+  /// CARD | PAYPAL | WALLET | MANUAL, filled when payment succeeds.
+  paymentMethodType    String?    @map("payment_method_type") @db.VarChar(20)
+  cardBrand            String?    @map("card_brand") @db.VarChar(20)
+  cardLast4            String?    @map("card_last4") @db.VarChar(4)
+  billSameAsShipping   Boolean    @default(true) @map("bill_same_as_shipping")
+  billAddressLine1     String?    @map("bill_address_line1") @db.VarChar(255)
+  billPostalCode       String?    @map("bill_postal_code") @db.VarChar(20)
+  user                 User?      @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "fk_orders_user")
+  promotion            Promotion? @relation(fields: [promotionId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_orders_promotion")
 
   items         OrderItem[]
   events        OrderEvent[]
@@ -297,6 +330,7 @@ model Order {
   @@index([paidAt], map: "idx_orders_paid_at")
   @@index([paymentIntentId], map: "idx_orders_payment_intent_id")
   @@index([status, createdAt], map: "idx_orders_status_created_at")
+  @@index([promotionId], map: "idx_orders_promotion_id")
   @@map("orders")
 }
 
@@ -323,9 +357,12 @@ model OrderItem {
   variantName      String?  @map("variant_name") @db.VarChar(150)
   color            String?  @db.VarChar(50)
   size             String?  @db.VarChar(50)
+  /// The SKU's MRP when bought, if above the price ("was" price).
+  mrp              Decimal? @db.Decimal(12, 2)
   order            Order    @relation(fields: [orderId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_items_order")
 
   returnItems OrderReturnItem[]
+  reviews     ProductReview[]
 
   @@index([orderId], map: "idx_order_items_order_id")
   @@index([merchantId, deleted], map: "idx_order_items_merchant_id")
@@ -407,6 +444,14 @@ model OrderReturn {
   restocked       Boolean   @default(false)
   receivedAt      DateTime? @map("received_at") @db.Timestamptz(6)
   refundedAt      DateTime? @map("refunded_at") @db.Timestamptz(6)
+  /// ORIGINAL | STORE_CREDIT.
+  refundTo        String    @default("ORIGINAL") @map("refund_to") @db.VarChar(20)
+  /// Code shown as a QR at the drop-off point.
+  dropoffCode     String?   @map("dropoff_code") @db.VarChar(40)
+  dropoffBy       DateTime? @map("dropoff_by") @db.Timestamptz(6)
+  droppedOffAt    DateTime? @map("dropped_off_at") @db.Timestamptz(6)
+  pickupDate      DateTime? @map("pickup_date") @db.Date
+  pickupWindow    String?   @map("pickup_window") @db.VarChar(40)
   order           Order     @relation(fields: [orderId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_returns_order")
 
   items OrderReturnItem[]
@@ -501,19 +546,23 @@ model PasswordResetToken {
 }
 
 model SellerApplication {
-  id         String   @id @default(uuid()) @db.Uuid
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  reference  String   @unique(map: "uk_seller_applications_reference") @db.VarChar(20)
-  fullName   String   @map("full_name") @db.VarChar(200)
-  email      String   @db.VarChar(255)
-  phone      String   @db.VarChar(30)
+  id         String    @id @default(uuid()) @db.Uuid
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  reference  String    @unique(map: "uk_seller_applications_reference") @db.VarChar(20)
+  fullName   String    @map("full_name") @db.VarChar(200)
+  email      String    @db.VarChar(255)
+  phone      String    @db.VarChar(30)
   categories String[]
   products   String
-  street     String   @db.VarChar(255)
-  city       String   @db.VarChar(100)
-  state      String   @db.VarChar(100)
-  postalCode String   @map("postal_code") @db.VarChar(20)
-  status     String   @default("NEW") @db.VarChar(20)
+  street     String    @db.VarChar(255)
+  city       String    @db.VarChar(100)
+  state      String    @db.VarChar(100)
+  postalCode String    @map("postal_code") @db.VarChar(20)
+  status     String    @default("NEW") @db.VarChar(20)
+  consentAt  DateTime? @map("consent_at") @db.Timestamptz(6)
+  adminNote  String?   @map("admin_note") @db.VarChar(2000)
+  handledBy  String?   @map("handled_by") @db.VarChar(255)
+  updatedAt  DateTime? @map("updated_at") @db.Timestamptz(6)
 
   @@index([status, createdAt], map: "idx_seller_applications_status")
   @@map("seller_applications")
@@ -571,15 +620,18 @@ model ProductSubmissionEvent {
 }
 
 model SupportMessage {
-  id           String   @id @default(uuid()) @db.Uuid
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  ticketNumber String   @unique(map: "uk_support_messages_ticket_number") @map("ticket_number") @db.VarChar(20)
-  name         String   @db.VarChar(200)
-  email        String   @db.VarChar(255)
-  topic        String   @db.VarChar(50)
-  orderNumber  String?  @map("order_number") @db.VarChar(40)
+  id           String    @id @default(uuid()) @db.Uuid
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  ticketNumber String    @unique(map: "uk_support_messages_ticket_number") @map("ticket_number") @db.VarChar(20)
+  name         String    @db.VarChar(200)
+  email        String    @db.VarChar(255)
+  topic        String    @db.VarChar(50)
+  orderNumber  String?   @map("order_number") @db.VarChar(40)
   message      String
-  status       String   @default("OPEN") @db.VarChar(20)
+  status       String    @default("OPEN") @db.VarChar(20)
+  adminNote    String?   @map("admin_note") @db.VarChar(2000)
+  handledBy    String?   @map("handled_by") @db.VarChar(255)
+  updatedAt    DateTime? @map("updated_at") @db.Timestamptz(6)
 
   @@index([status, createdAt], map: "idx_support_messages_status")
   @@map("support_messages")
@@ -597,4 +649,201 @@ model WebhookEvent {
 
   @@index([status], map: "idx_webhook_events_status")
   @@map("webhook_events")
+}
+
+// 4_customer_account: promotions, reviews, saved items, store credit and gift
+// cards, payment methods, sessions, 2-step verification, notification
+// preferences and data export (designs 03-09 and your-account).
+
+model Promotion {
+  id               String    @id @default(uuid()) @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  /// Stored upper-case; matched case-insensitively.
+  code             String    @unique(map: "uk_promotions_code") @db.VarChar(40)
+  description      String    @db.VarChar(255)
+  /// PERCENT | FIXED | FREE_SHIPPING
+  type             String    @db.VarChar(20)
+  /// Percent for PERCENT, amount for FIXED, ignored for FREE_SHIPPING.
+  value            Decimal   @default(0) @db.Decimal(12, 2)
+  minSubtotal      Decimal?  @map("min_subtotal") @db.Decimal(12, 2)
+  startsAt         DateTime? @map("starts_at") @db.Timestamptz(6)
+  endsAt           DateTime? @map("ends_at") @db.Timestamptz(6)
+  usageLimit       Int?      @map("usage_limit")
+  perCustomerLimit Int?      @map("per_customer_limit")
+  /// Only for a customer's (or guest email's) first order.
+  firstOrderOnly   Boolean   @default(false) @map("first_order_only")
+  active           Boolean   @default(true)
+
+  orders Order[]
+
+  @@map("promotions")
+}
+
+model ProductReview {
+  id            String        @id @default(uuid()) @db.Uuid
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deleted       Boolean       @default(false)
+  parentId      String        @map("parent_id") @db.Uuid
+  /// The SKU bought (its colour/size label shows on the review).
+  productId     String        @map("product_id") @db.Uuid
+  userId        String        @map("user_id") @db.Uuid
+  orderItemId   String?       @map("order_item_id") @db.Uuid
+  rating        Int           @db.SmallInt
+  title         String        @db.VarChar(80)
+  body          String        @db.VarChar(2000)
+  recommend     Boolean       @default(true)
+  /// PENDING | PUBLISHED | REJECTED
+  status        String        @db.VarChar(20)
+  publishedAt   DateTime?     @map("published_at") @db.Timestamptz(6)
+  moderatorNote String?       @map("moderator_note") @db.VarChar(1000)
+  parent        ParentProduct @relation(fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_reviews_parent")
+  product       Product       @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_reviews_product")
+  user          User          @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_reviews_user")
+  orderItem     OrderItem?    @relation(fields: [orderItemId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_product_reviews_order_item")
+
+  @@index([parentId, status, createdAt], map: "idx_product_reviews_parent")
+  @@index([userId], map: "idx_product_reviews_user")
+  @@index([status, createdAt], map: "idx_product_reviews_status")
+  @@map("product_reviews")
+}
+
+model SavedItem {
+  id          String   @id @default(uuid()) @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  userId      String   @map("user_id") @db.Uuid
+  productId   String   @map("product_id") @db.Uuid
+  priceAtSave Decimal  @map("price_at_save") @db.Decimal(12, 2)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_saved_items_user")
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_saved_items_product")
+
+  @@unique([userId, productId], map: "uk_saved_items_user_product")
+  @@map("saved_items")
+}
+
+/// Deals and offers stay in users.marketing_opt_in.
+model NotificationPreference {
+  userId          String   @id @map("user_id") @db.Uuid
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  newArrivals     Boolean  @default(false) @map("new_arrivals")
+  priceDrops      Boolean  @default(true) @map("price_drops")
+  backInStock     Boolean  @default(true) @map("back_in_stock")
+  reviewReminders Boolean  @default(true) @map("review_reminders")
+  smsDelivery     Boolean  @default(false) @map("sms_delivery")
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_notification_preferences_user")
+
+  @@map("notification_preferences")
+}
+
+model GiftCard {
+  id               String    @id @default(uuid()) @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  /// sha256 of the 16-character code (dashes removed, upper-case).
+  codeHash         String    @unique(map: "uk_gift_cards_code_hash") @map("code_hash") @db.VarChar(64)
+  last4            String    @db.VarChar(4)
+  pinHash          String    @map("pin_hash") @db.VarChar(255)
+  initialAmount    Decimal   @map("initial_amount") @db.Decimal(12, 2)
+  currency         String    @db.VarChar(3)
+  /// ACTIVE | REDEEMED | DISABLED
+  status           String    @db.VarChar(20)
+  redeemedByUserId String?   @map("redeemed_by_user_id") @db.Uuid
+  redeemedAt       DateTime? @map("redeemed_at") @db.Timestamptz(6)
+  expiresAt        DateTime? @map("expires_at") @db.Timestamptz(6)
+  createdBy        String?   @map("created_by") @db.VarChar(255)
+
+  @@map("gift_cards")
+}
+
+model StoreCreditEntry {
+  id           String   @id @default(uuid()) @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  userId       String   @map("user_id") @db.Uuid
+  /// Signed: + credit, - spend.
+  amount       Decimal  @db.Decimal(12, 2)
+  balanceAfter Decimal  @map("balance_after") @db.Decimal(12, 2)
+  /// GIFT_CARD | RETURN_REFUND | GOODWILL | ADJUSTMENT | FORFEIT
+  type         String   @db.VarChar(20)
+  description  String   @db.VarChar(255)
+  orderId      String?  @map("order_id") @db.Uuid
+  returnId     String?  @map("return_id") @db.Uuid
+  giftCardId   String?  @map("gift_card_id") @db.Uuid
+  createdBy    String?  @map("created_by") @db.VarChar(255)
+  user         User     @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_store_credit_entries_user")
+
+  @@index([userId, createdAt], map: "idx_store_credit_entries_user")
+  @@map("store_credit_entries")
+}
+
+model SavedPaymentMethod {
+  id                      String   @id @default(uuid()) @db.Uuid
+  createdAt               DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  deleted                 Boolean  @default(false)
+  userId                  String   @map("user_id") @db.Uuid
+  provider                String   @db.VarChar(20)
+  providerPaymentMethodId String   @unique(map: "uk_saved_payment_methods_provider_id") @map("provider_payment_method_id") @db.VarChar(255)
+  /// CARD | PAYPAL
+  type                    String   @db.VarChar(20)
+  brand                   String?  @db.VarChar(20)
+  last4                   String?  @db.VarChar(4)
+  expMonth                Int?     @map("exp_month")
+  expYear                 Int?     @map("exp_year")
+  holderName              String?  @map("holder_name") @db.VarChar(200)
+  email                   String?  @db.VarChar(255)
+  isDefault               Boolean  @default(false) @map("is_default")
+  user                    User     @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_saved_payment_methods_user")
+
+  @@index([userId, deleted], map: "idx_saved_payment_methods_user")
+  @@map("saved_payment_methods")
+}
+
+model UserSession {
+  id         String    @id @default(uuid()) @db.Uuid
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  userId     String    @map("user_id") @db.Uuid
+  userAgent  String?   @map("user_agent") @db.VarChar(255)
+  /// e.g. "Chrome on Windows".
+  label      String    @db.VarChar(100)
+  /// DESKTOP | PHONE
+  deviceType String    @map("device_type") @db.VarChar(20)
+  ip         String?   @db.VarChar(45)
+  lastSeenAt DateTime  @map("last_seen_at") @db.Timestamptz(6)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6)
+  user       User      @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_user_sessions_user")
+
+  @@index([userId, revokedAt], map: "idx_user_sessions_user")
+  @@map("user_sessions")
+}
+
+model OtpChallenge {
+  id         String    @id @default(uuid()) @db.Uuid
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  userId     String    @map("user_id") @db.Uuid
+  /// ENROLL | LOGIN
+  purpose    String    @db.VarChar(20)
+  phone      String    @db.VarChar(20)
+  codeHash   String    @map("code_hash") @db.VarChar(64)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  attempts   Int       @default(0)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+  user       User      @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_otp_challenges_user")
+
+  @@index([userId, createdAt], map: "idx_otp_challenges_user")
+  @@map("otp_challenges")
+}
+
+model DataExportRequest {
+  id                String    @id @default(uuid()) @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  userId            String    @map("user_id") @db.Uuid
+  /// REQUESTED | READY | FAILED | EXPIRED
+  status            String    @db.VarChar(20)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+  expiresAt         DateTime? @map("expires_at") @db.Timestamptz(6)
+  downloadTokenHash String?   @map("download_token_hash") @db.VarChar(64)
+  payload           Json?
+  user              User      @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_data_export_requests_user")
+
+  @@index([userId, createdAt], map: "idx_data_export_requests_user")
+  @@map("data_export_requests")
 }

@@ -6,6 +6,7 @@ import { optionalString, requiredString } from '../common/validation';
 import type { Config } from '../config';
 import type { Mailer } from '../notify/mailer';
 import { normalizeOrderNumber } from '../order/order-number';
+import { usStateCode } from './us-states';
 
 const email = () =>
   requiredString({
@@ -16,11 +17,94 @@ const email = () =>
     sizeMessage: 'Email must not exceed 255 characters',
   });
 
+/** The help center's topic menu, verbatim (frontend HelpCenter CONTACT_TOPICS). */
+export const SUPPORT_TOPICS = [
+  'Where is my order?',
+  'Returns and refunds',
+  'Damaged or wrong item',
+  'Payment or billing',
+  'Product question',
+  'Account',
+  'Something else',
+] as const;
+
+/**
+ * A required string that is then checked and normalised. `requiredString`
+ * reports blank / too long first; the check runs only when that passed.
+ */
+const normalised = (
+  rules: Parameters<typeof requiredString>[0],
+  check: (value: string) => string | null,
+  message: string,
+) =>
+  requiredString(rules).pipe(
+    z.string().transform((value, ctx) => {
+      const out = check(value);
+      if (out === null) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+        return z.NEVER;
+      }
+      return out;
+    }),
+  );
+
+/** "(503) 555-0199", "503.555.0199" or "+1 503 555 0199" → "(503) 555-0199". */
+function usPhone(value: string): string | null {
+  if (!/^[+]?[0-9 ().-]{7,30}$/.test(value.trim())) return null;
+  let d = value.replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
+  return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : null;
+}
+
+/**
+ * Category list. A bad entry is reported both at `categories[i]` and at
+ * `categories`, so a form that only knows the list field still shows it.
+ */
+const categoryList = () =>
+  z.unknown().transform((value, ctx): string[] => {
+    const fail = (message: string, path: (string | number)[] = []) =>
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message, path });
+    if (value === undefined || value === null || (Array.isArray(value) && value.length === 0)) {
+      fail('Choose at least one category');
+      return z.NEVER;
+    }
+    if (!Array.isArray(value)) {
+      fail('must be a list of categories');
+      return z.NEVER;
+    }
+    if (value.length > 20) {
+      fail('Choose at most 20 categories');
+      return z.NEVER;
+    }
+    let bad: string | null = null;
+    value.forEach((c, i) => {
+      const message =
+        typeof c !== 'string' || c.trim() === ''
+          ? 'Category must not be blank'
+          : c.length > 100
+            ? 'Category must not exceed 100 characters'
+            : null;
+      if (message) {
+        fail(message, [i]);
+        bad ??= message;
+      }
+    });
+    if (bad) {
+      fail(bad);
+      return z.NEVER;
+    }
+    return value as string[];
+  });
+
 /** Help center contact form (design 10). */
 export const SupportMessageSchema = z.object({
   name: requiredString({ blankMessage: 'Name is required', max: 200, sizeMessage: 'Name must not exceed 200 characters' }),
   email: email(),
-  topic: requiredString({ blankMessage: 'Topic is required', max: 50, sizeMessage: 'Topic must not exceed 50 characters' }),
+  topic: normalised(
+    { blankMessage: 'Topic is required' },
+    (v) => SUPPORT_TOPICS.find((t) => t.toLowerCase() === v.trim().toLowerCase()) ?? null,
+    'Choose a topic.',
+  ),
   orderNumber: optionalString({ max: 40, sizeMessage: 'Order number must not exceed 40 characters' }),
   message: requiredString({
     blankMessage: 'Message is required',
@@ -34,29 +118,26 @@ export const SupportMessageSchema = z.object({
 export const SellerApplicationSchema = z.object({
   fullName: requiredString({ blankMessage: 'Full name is required', max: 200, sizeMessage: 'Full name must not exceed 200 characters' }),
   email: email(),
-  phone: requiredString({
-    blankMessage: 'Phone is required',
-    pattern: /^[+]?[0-9 ()-]{7,30}$/,
-    patternMessage: 'Must be a valid phone number',
-    max: 30,
-    sizeMessage: 'Phone must not exceed 30 characters',
-  }),
-  categories: z
-    .array(
-      requiredString({ blankMessage: 'Category must not be blank', max: 100, sizeMessage: 'Category must not exceed 100 characters' }),
-      { required_error: 'Choose at least one category', invalid_type_error: 'must be a list of categories' },
-    )
-    .min(1, 'Choose at least one category')
-    .max(20, 'Choose at most 20 categories'),
-  products: requiredString({
-    blankMessage: 'Tell us what you sell',
-    max: 2000,
-    sizeMessage: 'Products must not exceed 2000 characters',
-  }),
+  // Messages for the checks tightened in D1 are the form's own (SellWithUs MESSAGES).
+  phone: normalised(
+    { blankMessage: 'Phone is required', max: 30, sizeMessage: 'Phone must not exceed 30 characters' },
+    usPhone,
+    'Enter a 10-digit US phone number',
+  ),
+  categories: categoryList(),
+  products: normalised(
+    { blankMessage: 'Tell us which products you want to sell', max: 2000, sizeMessage: 'Products must not exceed 2000 characters' },
+    (v) => (v.trim().length >= 3 ? v : null),
+    'Tell us which products you want to sell',
+  ),
   street: requiredString({ blankMessage: 'Street is required', max: 255, sizeMessage: 'Street must not exceed 255 characters' }),
   city: requiredString({ blankMessage: 'City is required', max: 100, sizeMessage: 'City must not exceed 100 characters' }),
-  state: requiredString({ blankMessage: 'State is required', max: 100, sizeMessage: 'State must not exceed 100 characters' }),
-  postalCode: requiredString({ blankMessage: 'Postal code is required', max: 20, sizeMessage: 'Postal code must not exceed 20 characters' }),
+  state: normalised({ blankMessage: 'Select a state', max: 100, sizeMessage: 'Select a state' }, usStateCode, 'Select a state'),
+  postalCode: normalised(
+    { blankMessage: 'Enter a 5-digit ZIP', max: 20, sizeMessage: 'Enter a 5-digit ZIP' },
+    (v) => (/^\d{5}$/.test(v.trim()) ? v.trim() : null),
+    'Enter a 5-digit ZIP',
+  ),
   consent: z.literal(true, { errorMap: () => ({ message: 'You must agree to be contacted about your application' }) }),
 });
 
@@ -84,7 +165,7 @@ export class SupportService {
             ticketNumber,
             name: input.name.trim(),
             email: input.email.trim(),
-            topic: input.topic.trim(),
+            topic: input.topic,
             orderNumber: input.orderNumber?.trim() ? normalizeOrderNumber(input.orderNumber) : null,
             message: input.message.trim(),
           },
@@ -110,13 +191,15 @@ export class SupportService {
             reference,
             fullName: input.fullName.trim(),
             email: input.email.trim(),
-            phone: input.phone.trim(),
+            phone: input.phone,
             categories: [...new Set(input.categories.map((c) => c.trim()))],
             products: input.products.trim(),
             street: input.street.trim(),
             city: input.city.trim(),
-            state: input.state.trim(),
-            postalCode: input.postalCode.trim(),
+            state: input.state,
+            postalCode: input.postalCode,
+            // The schema accepts only consent === true, so this is the moment it was given.
+            consentAt: new Date(),
           },
         }),
     );

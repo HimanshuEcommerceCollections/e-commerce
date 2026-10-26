@@ -1,10 +1,18 @@
 import jwt, { type Algorithm } from 'jsonwebtoken';
 
+export interface TokenClaims {
+  email: string;
+  issuedAtSeconds: number | null;
+  /** The user_sessions row the token belongs to; null for tokens minted before sessions existed. */
+  sessionId: string | null;
+}
+
 /**
  * Stateless HMAC JWTs, compatible with the Java server's jjwt tokens: subject
  * is the user's email, and the algorithm follows the secret's length as jjwt's
  * `Keys.hmacShaKeyFor` did (≥ 64 bytes → HS512, ≥ 48 → HS384, else HS256), so
  * tokens issued by either server verify on the other during the switch-over.
+ * The extra `sid` claim (the session) is ignored by the Java server.
  */
 export class JwtService {
   private readonly key: Buffer;
@@ -26,13 +34,15 @@ export class JwtService {
     );
   }
 
-  generateToken(email: string): string {
+  /** @param options.lifetimeMs defaults to JWT_EXPIRATION_MS ("keep me signed in" passes a longer one). */
+  generateToken(email: string, options: { sessionId?: string | null; lifetimeMs?: number } = {}): string {
     const nowMs = Date.now();
     return jwt.sign(
       {
         sub: email,
+        ...(options.sessionId ? { sid: options.sessionId } : {}),
         iat: Math.floor(nowMs / 1000),
-        exp: Math.floor((nowMs + this.expirationMs) / 1000),
+        exp: Math.floor((nowMs + (options.lifetimeMs ?? this.expirationMs)) / 1000),
       },
       this.key,
       // iat is set above; jsonwebtoken keeps it (noTimestamp would strip it,
@@ -46,8 +56,8 @@ export class JwtService {
     return this.verifyClaims(token)?.email ?? null;
   }
 
-  /** Subject and issue time (whole seconds), or null if the token is malformed, forged or expired. */
-  verifyClaims(token: string): { email: string; issuedAtSeconds: number | null } | null {
+  /** Subject, issue time (whole seconds) and session, or null if the token is malformed, forged or expired. */
+  verifyClaims(token: string): TokenClaims | null {
     try {
       const payload = jwt.verify(token, this.key, { algorithms: this.accepted });
       if (typeof payload !== 'object' || typeof payload.sub !== 'string') return null;
@@ -58,7 +68,8 @@ export class JwtService {
           : typeof payload.exp === 'number'
             ? payload.exp - Math.floor(this.expirationMs / 1000)
             : null;
-      return { email: payload.sub, issuedAtSeconds };
+      const sessionId = typeof payload.sid === 'string' ? payload.sid : null;
+      return { email: payload.sub, issuedAtSeconds, sessionId };
     } catch {
       return null;
     }

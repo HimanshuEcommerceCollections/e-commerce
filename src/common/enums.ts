@@ -49,11 +49,30 @@ export type ReturnStatus = (typeof RETURN_STATUSES)[number];
 export const RETURN_METHODS = ['DROPOFF', 'PICKUP'] as const;
 export type ReturnMethod = (typeof RETURN_METHODS)[number];
 
+/** order_returns.refund_to: the original payment, or the customer's store credit. */
+export const RETURN_REFUND_TARGETS = ['ORIGINAL', 'STORE_CREDIT'] as const;
+export type ReturnRefundTarget = (typeof RETURN_REFUND_TARGETS)[number];
+
+/** product_reviews.status: only PUBLISHED reviews show and count toward the rating. */
+export const REVIEW_STATUSES = ['PENDING', 'PUBLISHED', 'REJECTED'] as const;
+export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
+
 export const RETURN_REQUESTERS = ['CUSTOMER', 'ADMIN'] as const;
 export type ReturnRequester = (typeof RETURN_REQUESTERS)[number];
 
 export const SHIPPING_METHODS = ['STANDARD', 'EXPRESS'] as const;
 export type ShippingMethod = (typeof SHIPPING_METHODS)[number];
+
+/** promotions.type: percent off the subtotal, a fixed amount off, or free Standard shipping. */
+export const PROMOTION_TYPES = ['PERCENT', 'FIXED', 'FREE_SHIPPING'] as const;
+export type PromotionType = (typeof PROMOTION_TYPES)[number];
+
+/** orders.payment_method_type, filled when payment succeeds. */
+export const PAYMENT_METHOD_TYPES = ['CARD', 'PAYPAL', 'WALLET', 'MANUAL'] as const;
+export type PaymentMethodType = (typeof PAYMENT_METHOD_TYPES)[number];
+
+export const TAX_MODES = ['destination', 'flat'] as const;
+export type TaxMode = (typeof TAX_MODES)[number];
 
 /** SELLER: a seller's own stock update, applied without review and audited here. */
 export const STOCK_MOVEMENT_SOURCES = ['ADJUSTMENT', 'BULK_UPDATE', 'IMPORT', 'RETURN', 'ORDER', 'CANCELLATION', 'SELLER'] as const;
@@ -78,6 +97,14 @@ export const NOTIFICATION_TEMPLATES = [
   'SUPPORT_TICKET',
   'SELLER_APPLICATION',
   'SUBMISSION_UPDATE',
+  // Customer account settings. OTP_CODE is a text message: to_address is the phone.
+  'OTP_CODE',
+  'DATA_EXPORT',
+  'ACCOUNT_DELETED',
+  'GIFT_CARD',
+  // Customer account shopping: "Email invoice", review moderation outcome.
+  'ORDER_INVOICE',
+  'REVIEW_UPDATE',
 ] as const;
 export type NotificationTemplate = (typeof NOTIFICATION_TEMPLATES)[number];
 
@@ -95,6 +122,14 @@ export type SubmissionKind = (typeof SUBMISSION_KINDS)[number];
 export const SUBMISSION_STATUSES = ['SUBMITTED', 'IN_REVIEW', 'CHANGES_REQUESTED', 'APPROVED', 'REJECTED', 'WITHDRAWN'] as const;
 export type SubmissionStatus = (typeof SUBMISSION_STATUSES)[number];
 export const OPEN_SUBMISSION_STATUSES = ['SUBMITTED', 'IN_REVIEW', 'CHANGES_REQUESTED'] as const satisfies readonly SubmissionStatus[];
+
+/** support_messages.status (admin inbox). */
+export const SUPPORT_MESSAGE_STATUSES = ['OPEN', 'IN_PROGRESS', 'CLOSED'] as const;
+export type SupportMessageStatus = (typeof SUPPORT_MESSAGE_STATUSES)[number];
+
+/** seller_applications.status (admin inbox). */
+export const SELLER_APPLICATION_STATUSES = ['NEW', 'CONTACTED', 'APPROVED', 'REJECTED'] as const;
+export type SellerApplicationStatus = (typeof SELLER_APPLICATION_STATUSES)[number];
 
 /** What the seller sees for a product (seller portal flow, page 2). */
 export const LISTING_STATES = [

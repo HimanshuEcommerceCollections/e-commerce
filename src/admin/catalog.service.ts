@@ -174,7 +174,7 @@ export class CatalogAdminService {
       }),
       this.prisma.parentProduct.count({ where }),
     ]);
-    return toPage(rows.map((p) => this.toProductRow(p)), total, pageable);
+    return toPage(rows.map((p) => ({ ...this.toProductRow(p), ...mrpRange(p.variants) })), total, pageable);
   }
 
   /** Products per status for the tabs; a product counts once per status its variants have. */
@@ -623,4 +623,14 @@ function productWhere(f: ProductFilter): Prisma.ParentProductWhereInput {
     });
   }
   return { AND: and };
+}
+
+/** List rows: the variants' compare-at (MRP) range, null when no variant has one. */
+function mrpRange(variants: Array<{ mrp: Prisma.Decimal | null }>) {
+  const mrps = variants.map((v) => v.mrp).filter((m): m is Prisma.Decimal => m !== null);
+  const pick = (better: (a: Prisma.Decimal, b: Prisma.Decimal) => boolean) =>
+    mrps.reduce<Prisma.Decimal | null>((a, b) => (a === null || better(b, a) ? b : a), null);
+  const min = pick((a, b) => a.lt(b));
+  const max = pick((a, b) => a.gt(b));
+  return { minMrp: min && money(min), maxMrp: max && money(max) };
 }

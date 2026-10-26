@@ -21,5 +21,17 @@ export function storeConfig(config: Config) {
     lowStockThreshold: config.inventory.lowStockThreshold,
     paymentProvider: config.payment.provider,
     stripePublishableKey: stripe && config.payment.stripe.publishableKey ? config.payment.stripe.publishableKey : null,
+    // Contract E (design-gap completion).
+    taxMode: config.pricing.taxMode,
+    /** Saved cards need the Stripe vault; the manual gateway has none. */
+    savedPaymentMethods: stripe,
+    reviewsEnabled: true,
+    supportHours: '8 AM – 8 PM ET',
+    returnCarrier: 'UPS',
+    promoCodesEnabled: true,
+    twoFactorAvailable: true,
+    /** No SMS provider yet: text messages (2-step codes, delivery texts) are only logged. */
+    smsAvailable: false,
+    stripePublishableKeyIsTest: config.payment.stripe.publishableKey.startsWith('pk_test_'),
   };
 }

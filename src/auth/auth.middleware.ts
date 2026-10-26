@@ -2,6 +2,7 @@ import type { User } from '@prisma/client';
 import type { RequestHandler } from 'express';
 import type { UserRole } from '../common/enums';
 import { AccessDeniedError, AuthenticationRequiredError } from '../common/errors';
+import { checkSession } from '../account/sessions.service';
 import type { Db } from '../db';
 import type { JwtService } from './jwt';
 
@@ -9,6 +10,8 @@ declare module 'express-serve-static-core' {
   interface Request {
     /** The authenticated user, set by `authenticate` when a valid bearer token is sent. */
     user?: User;
+    /** The token's session (user_sessions.id); absent for legacy tokens without a `sid`. */
+    sessionId?: string;
   }
 }
 
@@ -17,7 +20,9 @@ declare module 'express-serve-static-core' {
  * Never rejects: a missing or bad token leaves the request anonymous, and the
  * route guards below decide. The user (and so the role) is re-read from the
  * database each time, as the Java filter did. Tokens issued before the
- * user's last password change are refused ("sign out other devices").
+ * user's last password change are refused ("sign out other devices"), and so
+ * are tokens whose session was signed out. Tokens without a session (issued
+ * before sessions existed, or by the Java server) keep working.
  */
 export function authenticate(jwt: JwtService, db: Db): RequestHandler {
   return async (req, _res, next) => {
@@ -26,7 +31,14 @@ export function authenticate(jwt: JwtService, db: Db): RequestHandler {
       const claims = jwt.verifyClaims(header.slice('Bearer '.length));
       if (claims) {
         const user = await db.user.findUnique({ where: { email: claims.email } });
-        if (user && issuedAfterPasswordChange(claims.issuedAtSeconds, user.passwordChangedAt)) req.user = user;
+        if (
+          user &&
+          issuedAfterPasswordChange(claims.issuedAtSeconds, user.passwordChangedAt) &&
+          (claims.sessionId === null || (await checkSession(db, claims.sessionId, user.id)))
+        ) {
+          req.user = user;
+          if (claims.sessionId) req.sessionId = claims.sessionId;
+        }
       }
     }
     next();

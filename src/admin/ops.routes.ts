@@ -6,7 +6,7 @@ import { parsePageable } from '../common/pagination';
 import { parseBody, pathUuid, ValidationError } from '../common/validation';
 import type { Container } from '../container';
 import { staffActor } from '../order/order-events';
-import { ADMIN_CUSTOMER_SORTS, RoleUpdateSchema } from './customers.service';
+import { ADMIN_CUSTOMER_SORTS, CUSTOMER_SEGMENTS, RoleUpdateSchema, type CustomerSegment } from './customers.service';
 import {
   ADMIN_ORDER_SORTS,
   AdminCancelSchema,
@@ -116,6 +116,9 @@ export function adminOpsRoutes(c: Container): Router {
     const input = parseBody(ReturnActionSchema, req.body);
     res.json(ok(await c.adminReturns.act(id, input, actor(req)), 'Return updated'));
   });
+  r.post('/returns/:id/dropped-off', ...admin, async (req, res) => {
+    res.json(ok(await c.adminReturns.markDroppedOff(pathUuid(req.params.id), actor(req)), 'Return marked dropped off'));
+  });
 
   // ── Customers and staff (FR-AD-06/08) ────────────────────────────────────
 
@@ -124,13 +127,20 @@ export function adminOpsRoutes(c: Container): Router {
     if (role !== undefined && !(USER_ROLES as readonly string[]).includes(role)) {
       throw new ValidationError({ role: `must be one of ${USER_ROLES.join(', ')}` });
     }
-    return { search: query(req, 'search'), role: role as UserRole | undefined };
+    const segment = query(req, 'segment');
+    if (segment !== undefined && !(CUSTOMER_SEGMENTS as readonly string[]).includes(segment)) {
+      throw new ValidationError({ segment: `must be one of ${CUSTOMER_SEGMENTS.join(', ')}` });
+    }
+    return { search: query(req, 'search'), role: role as UserRole | undefined, segment: segment as CustomerSegment | undefined };
   };
   const customerPageable = (req: express.Request) =>
     parsePageable(req, { sort: 'createdAt,desc', allowedSorts: ADMIN_CUSTOMER_SORTS });
 
   r.get('/customers', ...admin, async (req, res) => {
     res.json(ok(await c.adminCustomers.list(customerFilter(req), customerPageable(req))));
+  });
+  r.get('/customers/stats', ...admin, async (req, res) => {
+    res.json(ok(await c.adminCustomers.stats(customerFilter(req))));
   });
   r.get('/customers/export', ...admin, async (req, res) => {
     csv(res, 'customers', await c.adminCustomers.exportCsv(customerFilter(req), customerPageable(req).sort));

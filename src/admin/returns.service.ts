@@ -2,7 +2,7 @@ import { randomInt } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { money } from '../common/api-response';
-import { RETURN_STATUSES, type NotificationTemplate, type ReturnStatus } from '../common/enums';
+import { RETURN_REFUND_TARGETS, RETURN_STATUSES, type NotificationTemplate, type ReturnStatus } from '../common/enums';
 import { DomainError, InvalidOrderStateError, OrderNotFoundError } from '../common/errors';
 import { logger } from '../common/logger';
 import { orderBy, skipTake, toPage, type Pageable } from '../common/pagination';
@@ -11,7 +11,7 @@ import type { Config } from '../config';
 import { TX, type Db } from '../db';
 import type { Mailer } from '../notify/mailer';
 import { recordOrderEvent } from '../order/order-events';
-import { estimatedRefund, toReturnResponse } from '../order/order.mapper';
+import { estimatedRefund, RETURN_CARRIER, toReturnResponse } from '../order/order.mapper';
 import { round2 } from '../order/pricing';
 import type { PaymentGateway } from '../payment/gateway';
 import { lockOrderRow, restock } from '../order/order.repository';
@@ -36,6 +36,7 @@ export const AdminReturnCreateSchema = z.object({
     .max(100, 'size must be between 1 and 100'),
   reason: requiredString({ max: 1000 }),
   method: oneOf(['DROPOFF', 'PICKUP'] as const),
+  refundTo: oneOf(RETURN_REFUND_TARGETS),
 });
 
 export const ReturnActionSchema = z.object({
@@ -137,6 +138,8 @@ export class AdminReturnService {
         reason: input.reason.trim(),
         method: input.method ?? null,
         requestedBy: 'ADMIN',
+        // Store credit needs an account to credit.
+        refundTo: input.refundTo === 'STORE_CREDIT' && order.userId ? 'STORE_CREDIT' : 'ORIGINAL',
         items: { create: input.items.map((i) => ({ orderItemId: i.orderItemId, quantity: i.quantity })) },
       });
       await recordOrderEvent(tx, orderId, { note: `Return ${ret.rmaNumber} opened: ${input.reason.trim()}`, actor });
@@ -148,7 +151,7 @@ export class AdminReturnService {
       `We've opened return ${row.rmaNumber} for your order ${row.order.orderNumber}.`,
       'We will email you the next steps.',
     ]);
-    return toReturnResponse(row, row.order.items, this.config.pricing);
+    return toReturnResponse(row, row.order.items, this.config.pricing, row.order);
   }
 
   async act(id: string, input: z.output<typeof ReturnActionSchema>, actor: string) {
@@ -259,11 +262,23 @@ export class AdminReturnService {
       if (amount.gt(left)) {
         throw new DomainError(400, `At most ${left.toFixed(2)} ${order.currency} can still be refunded on this order`);
       }
-      const reference = order.paymentIntentId ?? order.paymentReference;
-      if (!reference) throw new InvalidOrderStateError(`Order ${order.orderNumber} has no payment reference`);
-
-      const refundRef = await this.gateway.refund(reference, amount, order.currency, `refund-${reference}-${ret.rmaNumber}`);
-      log.info(`Refund ${refundRef} of ${amount.toFixed(2)} issued for return ${ret.rmaNumber}`);
+      let refundRef: string;
+      if (ret.refundTo === 'STORE_CREDIT') {
+        // No money moves at the provider: the customer's balance goes up instead.
+        if (!order.userId) throw new InvalidOrderStateError(`Order ${order.orderNumber} has no account to credit`);
+        refundRef = await creditStoreBalance(tx, order.userId, amount, {
+          description: `Refund for return ${ret.rmaNumber}`,
+          orderId: order.id,
+          returnId: ret.id,
+          createdBy: actor,
+        });
+        log.info(`Store credit ${amount.toFixed(2)} added for return ${ret.rmaNumber}`);
+      } else {
+        const reference = order.paymentIntentId ?? order.paymentReference;
+        if (!reference) throw new InvalidOrderStateError(`Order ${order.orderNumber} has no payment reference`);
+        refundRef = await this.gateway.refund(reference, amount, order.currency, `refund-${reference}-${ret.rmaNumber}`);
+        log.info(`Refund ${refundRef} of ${amount.toFixed(2)} issued for return ${ret.rmaNumber}`);
+      }
 
       await tx.orderReturn.update({
         where: { id },
@@ -279,18 +294,46 @@ export class AdminReturnService {
       if (!outcome) throw new InvalidOrderStateError('The refund would exceed the order total');
       await recordOrderEvent(tx, order.id, {
         status: outcome.status !== order.status ? outcome.status : null,
-        note: `Refunded ${amount.toFixed(2)} ${order.currency} for return ${ret.rmaNumber}`,
+        note: `Refunded ${amount.toFixed(2)} ${order.currency}${ret.refundTo === 'STORE_CREDIT' ? ' as store credit' : ''} for return ${ret.rmaNumber}`,
         actor,
       });
       return { row: await findReturn(tx, id), amount, fully: outcome.paymentStatus === 'REFUNDED' };
     }, TX.checkout);
 
+    const credit = row.refundTo === 'STORE_CREDIT';
     await this.notify(row, 'REFUND_ISSUED', `Refund issued for return ${row.rmaNumber}`, [
-      `We've refunded ${amount.toFixed(2)} ${row.order.currency} for return ${row.rmaNumber} (order ${row.order.orderNumber}).`,
+      credit
+        ? `We've added ${amount.toFixed(2)} ${row.order.currency} to your store credit for return ${row.rmaNumber} (order ${row.order.orderNumber}).`
+        : `We've refunded ${amount.toFixed(2)} ${row.order.currency} for return ${row.rmaNumber} (order ${row.order.orderNumber}).`,
       fully ? 'Your order is now fully refunded.' : '',
-      'It can take 5–10 business days to appear on your statement.',
+      credit ? "It's ready to use on your next order." : 'It can take 5–10 business days to appear on your statement.',
     ]);
     return this.toAdminReturn(row);
+  }
+
+  /**
+   * The customer handed the parcel in (the carrier scan, recorded by hand
+   * until there's a carrier integration). Only once, and only while the
+   * return is still with the customer.
+   */
+  async markDroppedOff(id: string, actor: string) {
+    const ret = await this.prisma.$transaction(async (tx) => {
+      const { count } = await tx.orderReturn.updateMany({
+        where: { id, status: { in: OPEN_RETURN }, droppedOffAt: null },
+        data: { droppedOffAt: new Date() },
+      });
+      if (count === 0) {
+        const current = await tx.orderReturn.findUnique({ where: { id }, select: { status: true, droppedOffAt: true } });
+        if (!current) throw returnNotFound(id);
+        throw new InvalidOrderStateError(
+          current.droppedOffAt ? 'This return was already dropped off' : `A ${current.status} return can't be marked dropped off`,
+        );
+      }
+      const row = await findReturn(tx, id);
+      await recordOrderEvent(tx, row.orderId, { note: `Return ${row.rmaNumber} dropped off at ${RETURN_CARRIER}`, actor });
+      return row;
+    }, TX.default);
+    return this.toAdminReturn(ret);
   }
 
   /** The returned lines' price and tax, capped at what's left on the order. */
@@ -304,7 +347,7 @@ export class AdminReturnService {
   private toAdminReturn(r: ReturnRow) {
     const byId = new Map(r.order.items.map((i) => [i.id, i]));
     return {
-      ...toReturnResponse(r, r.order.items, this.config.pricing),
+      ...toReturnResponse(r, r.order.items, this.config.pricing, r.order),
       adminNote: r.adminNote,
       refundReference: r.refundReference,
       refundDue: money(this.refundDue(r)),
@@ -360,6 +403,30 @@ async function stateError(db: Db, id: string, to: ReturnStatus) {
   const current = await db.orderReturn.findUnique({ where: { id }, select: { status: true } });
   if (!current) return returnNotFound(id);
   return new InvalidOrderStateError(`A ${current.status} return can't be moved to ${to}`);
+}
+
+/**
+ * Adds `amount` to the customer's store credit and records the RETURN_REFUND
+ * entry with the balance after it. Runs inside the refund transaction; the
+ * single UPDATE … RETURNING keeps concurrent credits from losing each other.
+ * Returns the entry id (the return's refund reference).
+ */
+async function creditStoreBalance(
+  db: Db,
+  userId: string,
+  amount: Prisma.Decimal,
+  ref: { description: string; orderId: string; returnId: string; createdBy: string },
+) {
+  const rows = await db.$queryRaw<{ balance: Prisma.Decimal }[]>`
+    UPDATE users SET store_credit_balance = store_credit_balance + ${amount}, updated_at = now()
+     WHERE id = ${userId}::uuid
+     RETURNING store_credit_balance AS balance`;
+  if (!rows[0]) throw new InvalidOrderStateError('The customer account no longer exists');
+  const entry = await db.storeCreditEntry.create({
+    data: { userId, amount, balanceAfter: rows[0].balance, type: 'RETURN_REFUND', ...ref },
+    select: { id: true },
+  });
+  return `STORE-CREDIT-${entry.id}`;
 }
 
 /** RMA- + 6 digits not used yet; uk_order_returns_rma_number still guards the insert. */

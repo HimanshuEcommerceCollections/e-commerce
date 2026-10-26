@@ -2,17 +2,25 @@ import type { Cart, PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { CartItemNotFoundError, InsufficientStockError, ProductNotAvailableError } from '../common/errors';
 import { isIntegrityViolation } from '../common/error-handler';
-import { integer, requiredUuid } from '../common/validation';
+import { integer, optionalString, requiredUuid } from '../common/validation';
 import type { Db } from '../db';
 import type { ShippingMethod } from '../common/enums';
-import type { PricingRules } from '../order/pricing';
+import type { PricingRules, TaxDestination } from '../order/pricing';
+import {
+  promoCodeField,
+  requiredPromoCode,
+  type PromoCustomer,
+  type PromotionService,
+} from '../promo/promotion.service';
 import {
   isPurchasable,
   loadCartProducts,
   mergeLineInputs,
+  purchasableSubtotal,
   toCartResponse,
   toCheckoutQuote,
   type CartLine,
+  type CartPricingOptions,
 } from './cart-pricing';
 
 export const CartItemSchema = z.object({
@@ -33,7 +41,45 @@ export const CartLinesBodySchema = z.object({
   items: z.preprocess((v) => v ?? [], CartLinesSchema),
 });
 
+const nullToUndefined = (v: unknown) => (v === null ? undefined : v);
+
+/**
+ * Ship-to state (and ZIP) for destination tax before checkout has a full
+ * address. Unknown or missing: tax falls back to the default rate and the
+ * response says `taxIsEstimate`.
+ */
+export const TaxDestinationSchema = z.preprocess(
+  nullToUndefined,
+  z
+    .object({
+      state: optionalString({ max: 100, sizeMessage: 'State must not exceed 100 characters' }),
+      postalCode: optionalString({ max: 20, sizeMessage: 'Postal code must not exceed 20 characters' }),
+    })
+    .optional(),
+);
+
+/** POST /api/cart/preview: the guest's lines, optionally with a promo code and a ship-to state. */
+export const CartPreviewSchema = CartLinesBodySchema.extend({
+  promoCode: promoCodeField(),
+  email: optionalString({ max: 255 }),
+  shippingAddress: TaxDestinationSchema,
+});
+
+/** POST /api/cart/promo/validate. Without items, a signed-in customer's server cart is used. */
+export const PromoValidateSchema = z.object({
+  code: requiredPromoCode(),
+  items: z.preprocess(nullToUndefined, CartLinesSchema.optional()),
+  email: optionalString({ max: 255 }),
+});
+
 export type CartLineInput = { productId: string; quantity: number };
+
+/** Promo code, buyer and destination for pricing a cart or quote. */
+export interface CartPricingRequest {
+  promoCode?: string | null;
+  customer?: PromoCustomer;
+  destination?: TaxDestination | null;
+}
 
 /** Most a merged line can hold (the add-to-cart limit). */
 const MAX_LINE_QUANTITY = 999;
@@ -48,11 +94,12 @@ export class CartService {
     private readonly prisma: PrismaClient,
     private readonly rules: PricingRules,
     private readonly currency: string,
+    private readonly promotions: PromotionService,
   ) {}
 
-  /** Fetch (lazily creating) the caller's cart. */
-  async getCart(userId: string) {
-    return this.buildResponse(await this.getOrCreateCart(userId));
+  /** Fetch (lazily creating) the caller's cart; `?promoCode=` prices a code against it. */
+  async getCart(userId: string, pricing: CartPricingRequest = {}) {
+    return this.buildResponse(await this.getOrCreateCart(userId), { ...pricing, customer: { userId } });
   }
 
   async addItem(userId: string, input: z.output<typeof CartItemSchema>) {
@@ -97,8 +144,29 @@ export class CartService {
    * dropped, unbuyable ones come back `available: false`, and quantities are
    * reported as sent (the client caps them with `stockQuantity`).
    */
-  async preview(items: CartLineInput[]) {
-    return toCartResponse(null, await this.resolveLines(this.prisma, items), this.rules);
+  async preview(items: CartLineInput[], pricing: CartPricingRequest = {}) {
+    const lines = await this.resolveLines(this.prisma, items);
+    return toCartResponse(null, lines, this.rules, await this.pricingOptions(lines, pricing));
+  }
+
+  /**
+   * POST /api/cart/promo/validate: the code against the given lines (or the
+   * signed-in customer's cart). A code that doesn't apply is a 400 on `code`.
+   */
+  async validatePromo(code: string, items: CartLineInput[] | undefined, customer: PromoCustomer) {
+    const lines =
+      items !== undefined
+        ? await this.resolveLines(this.prisma, items)
+        : customer.userId
+          ? await this.linesForUser(customer.userId)
+          : [];
+    return this.promotions.validate(code, purchasableSubtotal(lines), customer);
+  }
+
+  /** The promotion for an optional code (or why it doesn't apply) and the destination, for pricing. */
+  private async pricingOptions(lines: CartLine[], pricing: CartPricingRequest): Promise<CartPricingOptions> {
+    const { promo, error } = await this.promotions.lookup(pricing.promoCode, purchasableSubtotal(lines), pricing.customer ?? {});
+    return { promo, promoError: error, destination: pricing.destination ?? null };
   }
 
   /**
@@ -137,14 +205,20 @@ export class CartService {
    * Checkout quote (FR-ST-10): shipping options and totals for the given
    * lines, or — when a signed-in customer sends none — for their server cart.
    */
-  async quote(items: CartLineInput[] | undefined, customerId: string | null, method: ShippingMethod = 'STANDARD') {
+  async quote(
+    items: CartLineInput[] | undefined,
+    customerId: string | null,
+    method: ShippingMethod = 'STANDARD',
+    pricing: CartPricingRequest = {},
+  ) {
     const lines =
       items === undefined
         ? customerId
           ? await this.linesForUser(customerId)
           : []
         : await this.resolveLines(this.prisma, items);
-    return toCheckoutQuote(lines, method, this.rules, this.currency);
+    const customer = { ...pricing.customer, userId: customerId ?? pricing.customer?.userId ?? null };
+    return toCheckoutQuote(lines, method, this.rules, this.currency, await this.pricingOptions(lines, { ...pricing, customer }));
   }
 
   /** The caller's live cart lines (for the checkout quote); no cart means none. */
@@ -224,14 +298,15 @@ export class CartService {
     return product;
   }
 
-  private async buildResponse(cart: Cart) {
+  private async buildResponse(cart: Cart, pricing: CartPricingRequest = {}) {
     const items = await this.prisma.cartItem.findMany({
       where: { cartId: cart.id, deleted: false },
       orderBy: { createdAt: 'asc' },
     });
     // Soft-deleted products drop out (nothing to show); unbuyable ones stay
     // with available=false and don't count toward the totals.
-    return toCartResponse(cart, await this.resolveLines(this.prisma, items), this.rules);
+    const lines = await this.resolveLines(this.prisma, items);
+    return toCartResponse(cart, lines, this.rules, await this.pricingOptions(lines, pricing));
   }
 }
 

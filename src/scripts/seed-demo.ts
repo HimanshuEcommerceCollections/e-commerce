@@ -334,6 +334,21 @@ async function seedOrders(prisma: PrismaClient, customerId: string) {
   return { created, total: plans.length };
 }
 
+/**
+ * The design's promo codes (contract B1). Created once by code; an existing
+ * row keeps whatever an admin changed since.
+ */
+async function seedPromotions(prisma: PrismaClient) {
+  const promos = [
+    { code: 'WELCOME10', description: '10% off your first order', type: 'PERCENT', value: new Prisma.Decimal(10), firstOrderOnly: true },
+    { code: 'FREESHIP', description: 'Free standard shipping', type: 'FREE_SHIPPING', value: new Prisma.Decimal(0), firstOrderOnly: false },
+  ];
+  for (const p of promos) {
+    await prisma.promotion.upsert({ where: { code: p.code }, update: {}, create: p });
+  }
+  return promos.map((p) => p.code);
+}
+
 /** The password, unless it came from the environment (never logged). */
 const shown = (kind: string, a: SeedAccount) => (process.env[`SEED_${kind}_PASSWORD`] ? `(SEED_${kind}_PASSWORD)` : a.password);
 
@@ -352,13 +367,15 @@ async function main() {
     // The store sells its own catalog: products belong to the admin account.
     const catalog = await seedCatalog(prisma, admin.id);
     const orders = await seedOrders(prisma, customer.id);
+    const promos = await seedPromotions(prisma);
 
     console.log(`Demo data ready:
   accounts  ${ACCOUNTS.admin.email} / ${shown('ADMIN', ACCOUNTS.admin)} (admin)
             ${ACCOUNTS.catalog.email} / ${shown('CATALOG', ACCOUNTS.catalog)} (catalog)
             ${ACCOUNTS.customer.email} / ${shown('CUSTOMER', ACCOUNTS.customer)} (customer)
   catalog   ${catalog.parents} products, ${catalog.skus} SKUs
-  orders    ${orders.created} created (${orders.total - orders.created} already present)`);
+  orders    ${orders.created} created (${orders.total - orders.created} already present)
+  promos    ${promos.join(', ')}`);
   } finally {
     await prisma.$disconnect();
   }
