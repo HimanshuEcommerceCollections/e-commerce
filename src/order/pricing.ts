@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import type { Config, ShippingRate } from '../config';
 import type { ShippingMethod } from '../common/enums';
+import { stateTaxRate } from './state-tax';
 
 /**
  * Money, tax and shipping rules (FR-IN-06, FR-ST-09/10) — the one place they
@@ -23,9 +24,11 @@ export function round2(v: Numeric): Decimal {
 
 export interface PricingRules {
   pricesIncludeTax: boolean;
-  /** Percent; applies when a SKU has no tax rate of its own. */
+  /** Percent; applies when a SKU has no tax rate of its own (and, by destination, no known state). */
   defaultTaxRate: Numeric;
   shipping: Config['shipping'];
+  /** TAX_MODE. Absent means flat. */
+  taxMode?: 'destination' | 'flat';
 }
 
 export function pricingRules(config: Config): PricingRules {
@@ -33,21 +36,48 @@ export function pricingRules(config: Config): PricingRules {
     pricesIncludeTax: config.pricing.pricesIncludeTax,
     defaultTaxRate: config.pricing.defaultTaxRate,
     shipping: config.shipping,
+    taxMode: config.pricing.taxMode,
   };
 }
 
-/** The SKU's own rate (percent), else the store default. */
-export function effectiveTaxRate(skuRate: Numeric | null | undefined, rules: Pick<PricingRules, 'defaultTaxRate'>): Decimal {
-  return skuRate === null || skuRate === undefined ? D(rules.defaultTaxRate) : D(skuRate);
+/** Where the order ships, as far as tax is concerned. */
+export interface TaxDestination {
+  state?: string | null;
+  postalCode?: string | null;
+}
+
+/**
+ * The SKU's own rate (percent); else, in destination mode, the ship-to state's
+ * base rate; else the store default.
+ */
+export function effectiveTaxRate(
+  skuRate: Numeric | null | undefined,
+  rules: Pick<PricingRules, 'defaultTaxRate' | 'taxMode'>,
+  destination?: TaxDestination | null,
+): Decimal {
+  if (skuRate !== null && skuRate !== undefined) return D(skuRate);
+  if (rules.taxMode === 'destination') {
+    const byState = stateTaxRate(destination?.state);
+    if (byState !== null) return D(byState);
+  }
+  return D(rules.defaultTaxRate);
+}
+
+/** Destination mode without a known ship-to state: the tax shown is a guess ("Calculated at checkout"). */
+export function taxIsEstimate(rules: Pick<PricingRules, 'taxMode'>, destination?: TaxDestination | null): boolean {
+  return rules.taxMode === 'destination' && stateTaxRate(destination?.state) === null;
 }
 
 export interface LineAmounts {
   /** unit price × quantity. */
   subtotal: Decimal;
+  /** This line's share of the order discount (0 without a promotion). */
+  discount: Decimal;
   taxRate: Decimal;
   /**
-   * Tax on the line, rounded per line. With PRICES_INCLUDE_TAX it is the
-   * portion already inside the price (reported, never added).
+   * Tax on the line after its discount, rounded per line. With
+   * PRICES_INCLUDE_TAX it is the portion already inside the price (reported,
+   * never added).
    */
   taxAmount: Decimal;
 }
@@ -56,14 +86,84 @@ export function lineAmounts(
   unitPrice: Numeric,
   quantity: number,
   skuTaxRate: Numeric | null | undefined,
-  rules: Pick<PricingRules, 'pricesIncludeTax' | 'defaultTaxRate'>,
+  rules: Pick<PricingRules, 'pricesIncludeTax' | 'defaultTaxRate' | 'taxMode'>,
+  options: { discount?: Numeric; destination?: TaxDestination | null } = {},
 ): LineAmounts {
   const subtotal = D(unitPrice).mul(quantity);
-  const taxRate = effectiveTaxRate(skuTaxRate, rules);
+  const discount = D(options.discount ?? 0);
+  const taxable = subtotal.sub(discount);
+  const taxRate = effectiveTaxRate(skuTaxRate, rules, options.destination);
   const taxAmount = rules.pricesIncludeTax
-    ? round2(subtotal.mul(taxRate).div(HUNDRED.add(taxRate)))
-    : round2(subtotal.mul(taxRate).div(HUNDRED));
-  return { subtotal, taxRate, taxAmount };
+    ? round2(taxable.mul(taxRate).div(HUNDRED.add(taxRate)))
+    : round2(taxable.mul(taxRate).div(HUNDRED));
+  return { subtotal, discount, taxRate, taxAmount };
+}
+
+// ── Promotions ─────────────────────────────────────────────────────────────
+
+/** What a promotion takes off (src/promo): PERCENT of the subtotal, a FIXED amount, or FREE_SHIPPING. */
+export interface PromoTerms {
+  type: string;
+  value: Numeric;
+}
+
+/** PERCENT = round2(subtotal × value / 100); FIXED = min(value, subtotal); FREE_SHIPPING = 0. */
+export function promoDiscount(terms: PromoTerms | null | undefined, subtotal: Numeric): Decimal {
+  if (!terms) return ZERO;
+  const sub = D(subtotal);
+  if (terms.type === 'PERCENT') return Prisma.Decimal.min(sub, round2(sub.mul(D(terms.value)).div(HUNDRED)));
+  if (terms.type === 'FIXED') return round2(Prisma.Decimal.min(D(terms.value), sub));
+  return ZERO;
+}
+
+/**
+ * Splits an order discount across lines in proportion to their subtotals, in
+ * whole cents that add up exactly (largest remainder first), so tax can be
+ * charged on what each line really costs.
+ */
+export function allocateDiscount(subtotals: Numeric[], discount: Numeric): Decimal[] {
+  const subs = subtotals.map(D);
+  const total = subs.reduce((a, s) => a.add(s), ZERO);
+  const cents = D(discount).mul(100).toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP);
+  if (total.lte(0) || cents.lte(0)) return subs.map(() => ZERO);
+  const exact = subs.map((s) => cents.mul(s).div(total));
+  const floors = exact.map((e) => e.floor());
+  let left = cents.sub(floors.reduce((a, f) => a.add(f), ZERO)).toNumber();
+  const order = exact.map((e, i) => ({ i, r: e.sub(floors[i]) })).sort((a, b) => b.r.cmp(a.r) || a.i - b.i);
+  for (const { i } of order) {
+    if (left <= 0) break;
+    floors[i] = floors[i].add(1);
+    left--;
+  }
+  return floors.map((f) => f.div(100));
+}
+
+export interface PricedLines {
+  lines: LineAmounts[];
+  totals: OrderTotals;
+  /** The promotion made Standard shipping free. */
+  freeShipping: boolean;
+}
+
+/**
+ * Prices purchasable lines end to end: the promotion's discount, spread over
+ * the lines, then tax by destination on the discounted amounts, then shipping.
+ * Cart, quote and checkout all call this.
+ */
+export function priceLines(
+  lines: { unitPrice: Numeric; quantity: number; taxRate: Numeric | null | undefined }[],
+  method: ShippingMethod,
+  rules: PricingRules,
+  options: { promo?: PromoTerms | null; destination?: TaxDestination | null } = {},
+): PricedLines {
+  const subtotals = lines.map((l) => D(l.unitPrice).mul(l.quantity));
+  const subtotal = subtotals.reduce((a, s) => a.add(s), ZERO);
+  const shares = allocateDiscount(subtotals, promoDiscount(options.promo, subtotal));
+  const amounts = lines.map((l, i) =>
+    lineAmounts(l.unitPrice, l.quantity, l.taxRate, rules, { discount: shares[i], destination: options.destination }),
+  );
+  const freeShipping = options.promo?.type === 'FREE_SHIPPING';
+  return { lines: amounts, totals: orderTotals(amounts, method, rules, { freeShipping }), freeShipping };
 }
 
 export interface ShippingOption {
@@ -89,16 +189,20 @@ function rateFor(method: ShippingMethod, shipping: Config['shipping']): Shipping
   return method === 'EXPRESS' ? shipping.express : shipping.standard;
 }
 
-/** Standard is free at/above the threshold; Express never is. */
-export function isFreeShipping(method: ShippingMethod, subtotal: Numeric, shipping: Config['shipping']): boolean {
-  return method === 'STANDARD' && shipping.freeThreshold !== null && D(subtotal).gte(shipping.freeThreshold);
+/**
+ * Standard is free at/above the threshold, or with a FREE_SHIPPING promotion
+ * (`promoFree`); Express never is.
+ */
+export function isFreeShipping(method: ShippingMethod, subtotal: Numeric, shipping: Config['shipping'], promoFree = false): boolean {
+  if (method !== 'STANDARD') return false;
+  return promoFree || (shipping.freeThreshold !== null && D(subtotal).gte(shipping.freeThreshold));
 }
 
 /** Both methods priced for this subtotal (checkout quote). */
-export function shippingOptions(subtotal: Numeric, shipping: Config['shipping']): ShippingOption[] {
+export function shippingOptions(subtotal: Numeric, shipping: Config['shipping'], promoFree = false): ShippingOption[] {
   return (['STANDARD', 'EXPRESS'] as const).map((method) => {
     const rate = rateFor(method, shipping);
-    const free = isFreeShipping(method, subtotal, shipping);
+    const free = isFreeShipping(method, subtotal, shipping, promoFree);
     return {
       method,
       label: LABELS[method],
@@ -127,8 +231,8 @@ export function baseShippingOptions(shipping: Config['shipping']): Omit<Shipping
 }
 
 /** Shipping charged for a method; shipping itself is never taxed. */
-export function shippingFee(method: ShippingMethod, subtotal: Numeric, shipping: Config['shipping']): Decimal {
-  return isFreeShipping(method, subtotal, shipping) ? ZERO : round2(rateFor(method, shipping).fee);
+export function shippingFee(method: ShippingMethod, subtotal: Numeric, shipping: Config['shipping'], promoFree = false): Decimal {
+  return isFreeShipping(method, subtotal, shipping, promoFree) ? ZERO : round2(rateFor(method, shipping).fee);
 }
 
 export interface OrderTotals {
@@ -140,19 +244,21 @@ export interface OrderTotals {
 }
 
 /**
- * grand = subtotal + tax + shipping − discount. Included tax (PRICES_INCLUDE_TAX)
- * is reported in taxTotal but not added. Discount is always 0: there are no
- * promotions in P0.
+ * grand = subtotal − discount + tax + shipping. Included tax (PRICES_INCLUDE_TAX)
+ * is reported in taxTotal but not added. The discount is the lines' shares of
+ * the promotion (see priceLines); the free-shipping threshold looks at the
+ * subtotal before it.
  */
 export function orderTotals(
-  lines: Pick<LineAmounts, 'subtotal' | 'taxAmount'>[],
+  lines: (Pick<LineAmounts, 'subtotal' | 'taxAmount'> & { discount?: Decimal })[],
   method: ShippingMethod,
   rules: Pick<PricingRules, 'pricesIncludeTax' | 'shipping'>,
+  options: { freeShipping?: boolean } = {},
 ): OrderTotals {
   const subtotal = round2(lines.reduce((acc, l) => acc.add(l.subtotal), ZERO));
   const taxTotal = round2(lines.reduce((acc, l) => acc.add(l.taxAmount), ZERO));
-  const shippingTotal = lines.length ? shippingFee(method, subtotal, rules.shipping) : ZERO;
-  const discountTotal = ZERO;
+  const shippingTotal = lines.length ? shippingFee(method, subtotal, rules.shipping, options.freeShipping) : ZERO;
+  const discountTotal = round2(lines.reduce((acc, l) => acc.add(l.discount ?? ZERO), ZERO));
   const grandTotal = subtotal
     .add(rules.pricesIncludeTax ? ZERO : taxTotal)
     .add(shippingTotal)

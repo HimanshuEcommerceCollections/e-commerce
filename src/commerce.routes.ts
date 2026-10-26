@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { accountSettingsRoutes, clientInfo } from './account/account-settings.routes';
 import { AnalyticsBatchSchema } from './analytics/analytics.service';
 import { currentUser, requireAuth } from './auth/auth.middleware';
 import { OrderAccountSchema } from './auth/auth.service';
@@ -20,7 +21,12 @@ export function checkoutRoutes(c: Container): Router {
   r.post('/quote', async (req, res) => {
     const input = parseBody(QuoteSchema, req.body);
     const customerId = req.user?.role === 'ROLE_CUSTOMER' ? req.user.id : null;
-    res.json(ok(await c.cart.quote(input.items, customerId, input.shippingMethod)));
+    const data = await c.cart.quote(input.items, customerId, input.shippingMethod, {
+      promoCode: input.promoCode,
+      customer: { email: input.email },
+      destination: input.shippingAddress,
+    });
+    res.json(ok(data));
   });
 
   /** Idempotency-Key is required: a retry returns the same order (and token). */
@@ -36,7 +42,12 @@ export function checkoutRoutes(c: Container): Router {
 
   r.post('/orders/:orderNumber/account', async (req, res) => {
     const input = parseBody(OrderAccountSchema, req.body);
-    const data = await c.auth.createAccountFromGuestOrder(String(req.params.orderNumber), req.header('X-Order-Token'), input);
+    const data = await c.auth.createAccountFromGuestOrder(
+      String(req.params.orderNumber),
+      req.header('X-Order-Token'),
+      input,
+      clientInfo(req),
+    );
     res.status(201).json(created(data, 'Account created'));
   });
   return r;
@@ -60,12 +71,15 @@ export function accountRoutes(c: Container): Router {
   });
   r.patch('/', async (req, res) => {
     const input = parseBody(ProfileUpdateSchema, req.body);
-    res.json(ok(await c.accounts.updateProfile(currentUser(req), input), 'Profile updated'));
+    res.json(ok(await c.accounts.updateProfile(currentUser(req), input, req.sessionId), 'Profile updated'));
   });
   r.post('/password', async (req, res) => {
     const input = parseBody(PasswordChangeSchema, req.body);
-    res.json(ok(await c.accounts.changePassword(currentUser(req), input), 'Password changed'));
+    const data = await c.accounts.changePassword(currentUser(req), input, req.sessionId, clientInfo(req));
+    res.json(ok(data, 'Password changed'));
   });
+  // Sessions, 2-step, notifications, store credit, payment methods, privacy.
+  r.use(accountSettingsRoutes(c));
   return r;
 }
 

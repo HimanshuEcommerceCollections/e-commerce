@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { PaymentGateway, PaymentInitiation } from './gateway';
+import type { PaymentGateway, PaymentInitiation, PaymentMethodDetails } from './gateway';
 
 /**
  * Default gateway when no provider is configured. Moves no money: the order
@@ -32,4 +32,12 @@ export class ManualPaymentGateway implements PaymentGateway {
   supportsManualConfirmation() {
     return true;
   }
+
+  /** Paid out of band (marked by an admin). */
+  async describePayment(): Promise<PaymentMethodDetails> {
+    return { type: 'MANUAL', brand: null, last4: null };
+  }
+
+  /** Nothing to vault cards with: saved payment methods answer 501. */
+  readonly savedPaymentMethods = null;
 }

@@ -32,10 +32,11 @@ export const ORDER_DETAIL_INCLUDE = {
 
 export type OrderDetail = Prisma.OrderGetPayload<{ include: typeof ORDER_DETAIL_INCLUDE }>;
 
-/** List rows: lines for the thumbnails, and the newest shipment for the tracking link. */
+/** List rows: lines for the thumbnails, the newest shipment for the tracking link, returns for "Return by". */
 export const ORDER_SUMMARY_INCLUDE = {
   items: { where: { deleted: false }, orderBy: { createdAt: 'asc' } },
   shipments: { orderBy: { createdAt: 'desc' }, take: 1 },
+  returns: { orderBy: { createdAt: 'asc' }, include: { items: true } },
 } satisfies Prisma.OrderInclude;
 
 export type OrderSummaryRow = Prisma.OrderGetPayload<{ include: typeof ORDER_SUMMARY_INCLUDE }>;
@@ -69,6 +70,30 @@ export function returnableUntil(o: Pick<Order, 'deliveredAt'>, view: Pick<OrderV
   return new Date(o.deliveredAt.getTime() + view.returnWindowDays * 86_400_000);
 }
 
+/** Return requests count against a line unless rejected. */
+export const LIVE_RETURN_STATUSES = ['REQUESTED', 'APPROVED', 'RECEIVED', 'REFUNDED'];
+
+/** Units of a line the customer can still send back: bought minus returned or already requested. */
+export function returnableQuantity(item: OrderItem, returns: (OrderReturn & { items: OrderReturnItem[] })[]) {
+  const requested = returns
+    .filter((r) => LIVE_RETURN_STATUSES.includes(r.status))
+    .flatMap((r) => r.items)
+    .filter((ri) => ri.orderItemId === item.id)
+    .reduce((n, ri) => n + ri.quantity, 0);
+  return Math.max(0, item.quantity - Math.max(item.returnedQuantity, requested));
+}
+
+/** A delivered order inside its return window with at least one unit left to return. */
+export function hasReturnableItems(
+  o: Pick<Order, 'status' | 'deliveredAt'> & { items: OrderItem[]; returns?: (OrderReturn & { items: OrderReturnItem[] })[] },
+  view: Pick<OrderView, 'returnWindowDays'> | undefined,
+  now = Date.now(),
+) {
+  const until = returnableUntil(o, view);
+  if (o.status !== 'DELIVERED' || !until || until.getTime() < now) return false;
+  return o.items.some((i) => returnableQuantity(i, o.returns ?? []) > 0);
+}
+
 export function toShippingAddress(o: Order) {
   return {
     recipientName: o.shipRecipientName,
@@ -82,11 +107,28 @@ export function toShippingAddress(o: Order) {
   };
 }
 
-export function toOrderItemResponse(i: OrderItem, parentId: string | null = null) {
+/** "Visa •••• 4242": what paid for the order, once payment succeeded. */
+export function toPaymentMethod(o: Pick<Order, 'paymentMethodType' | 'cardBrand' | 'cardLast4'>) {
+  return o.paymentMethodType ? { type: o.paymentMethodType, brand: o.cardBrand, last4: o.cardLast4 } : null;
+}
+
+/** Promo, savings, payment method and billing (contract B3), for the full order and the list row. */
+export function orderSnapshots(o: Order) {
+  return {
+    promoCode: o.promoCode,
+    savingsTotal: money(o.savingsTotal),
+    payment: toPaymentMethod(o),
+    billingSameAsShipping: o.billSameAsShipping,
+  };
+}
+
+export function toOrderItemResponse(i: OrderItem, parentId: string | null = null, productSlug: string | null = null) {
   return {
     id: i.id,
     productId: i.productId,
     parentId,
+    productSlug,
+    mrp: i.mrp === null ? null : money(i.mrp),
     merchantId: i.merchantId,
     productName: i.productName,
     sku: i.sku,
@@ -160,23 +202,60 @@ export function estimatedRefund(
   return round2(total);
 }
 
+/** Returns travel by UPS (no carrier integration yet: the code is shown at the counter). */
+export const RETURN_CARRIER = 'UPS';
+
+/** Progress for the return tracker: 0 Started, 1 Dropped off, 2 Received, 3 Refunded. */
+export function returnStep(r: Pick<OrderReturn, 'status' | 'droppedOffAt'>): 0 | 1 | 2 | 3 {
+  if (r.status === 'REFUNDED') return 3;
+  if (r.status === 'RECEIVED') return 2;
+  return r.droppedOffAt ? 1 : 0;
+}
+
+/** A return (`ReturnRequest`): lines with their snapshot and value, drop-off/pickup logistics, refund target. */
 export function toReturnResponse(
   r: OrderReturn & { items: OrderReturnItem[] },
   orderItems: OrderItem[],
   view?: Pick<OrderView, 'pricesIncludeTax'>,
+  order?: Pick<Order, 'orderNumber'>,
 ) {
-  const items = r.items.map((i) => ({ orderItemId: i.orderItemId, quantity: i.quantity }));
+  const includeTax = view?.pricesIncludeTax ?? false;
+  const byId = new Map(orderItems.map((i) => [i.id, i]));
+  const items = r.items.map((i) => {
+    const line = byId.get(i.orderItemId);
+    return {
+      orderItemId: i.orderItemId,
+      quantity: i.quantity,
+      productId: line?.productId ?? null,
+      productName: line?.productName ?? '',
+      imageUrl: line?.imageUrl ?? null,
+      color: line?.color ?? null,
+      size: line?.size ?? null,
+      amount: money(estimatedRefund([i], orderItems, includeTax)),
+    };
+  });
   return {
     id: r.id,
     rmaNumber: r.rmaNumber,
+    orderId: r.orderId,
+    orderNumber: order?.orderNumber ?? null,
     status: r.status,
     reason: r.reason,
     method: r.method,
     requestedBy: r.requestedBy,
+    refundTo: r.refundTo,
     refundAmount: r.refundAmount === null ? null : money(r.refundAmount),
-    estimatedRefund: money(estimatedRefund(items, orderItems, view?.pricesIncludeTax ?? false)),
+    estimatedRefund: money(estimatedRefund(r.items, orderItems, includeTax)),
     restocked: r.restocked,
     items,
+    carrier: RETURN_CARRIER,
+    step: returnStep(r),
+    dropoffCode: r.dropoffCode,
+    dropoffBy: r.dropoffBy,
+    droppedOffAt: r.droppedOffAt,
+    // A calendar date (date column): "2026-10-24".
+    pickupDate: r.pickupDate ? r.pickupDate.toISOString().slice(0, 10) : null,
+    pickupWindow: r.pickupWindow,
     createdAt: r.createdAt,
     receivedAt: r.receivedAt,
     refundedAt: r.refundedAt,
@@ -191,7 +270,7 @@ export function toReturnResponse(
 export function toOrderResponse(
   o: OrderWithItems & Partial<Pick<OrderDetail, 'events' | 'shipments' | 'returns'>>,
   view?: OrderView,
-  options: { customerView?: boolean; parentIds?: Map<string, string> } = {},
+  options: { customerView?: boolean; parentIds?: Map<string, string>; slugs?: Map<string, string> } = {},
 ) {
   const events = o.events ?? [];
   const timeline = events.length
@@ -210,16 +289,20 @@ export function toOrderResponse(
     discountTotal: money(o.discountTotal),
     grandTotal: money(o.grandTotal),
     refundedTotal: money(o.refundedTotal),
+    ...orderSnapshots(o),
     shippingMethod: o.shippingMethod,
     paymentStatus: o.paymentStatus,
     customerEmail: o.customerEmail,
     guest: o.userId === null,
     estimatedDelivery: deliveryWindow(o, view),
     shippingAddress: toShippingAddress(o),
-    items: o.items.map((i) => toOrderItemResponse(i, options.parentIds?.get(i.productId) ?? null)),
+    items: o.items.map((i) =>
+      toOrderItemResponse(i, options.parentIds?.get(i.productId) ?? null, options.slugs?.get(i.productId) ?? null),
+    ),
+    hasReturnableItems: hasReturnableItems(o, view),
     timeline,
     shipments: (o.shipments ?? []).map(toShipmentResponse),
-    returns: (o.returns ?? []).map((r) => toReturnResponse(r, o.items, view)),
+    returns: (o.returns ?? []).map((r) => toReturnResponse(r, o.items, view, o)),
     returnableUntil: returnableUntil(o, view),
     paidAt: o.paidAt,
     shippedAt: o.shippedAt,
@@ -230,8 +313,13 @@ export function toOrderResponse(
 }
 
 /** Account order list row (`OrderSummary`). */
-export function toOrderSummaryResponse(o: OrderSummaryRow, view?: OrderView) {
+export function toOrderSummaryResponse(
+  o: OrderSummaryRow,
+  view?: OrderView,
+  refs?: Map<string, { parentId: string; slug: string }>,
+) {
   const latest = o.shipments[0];
+  const returnable = hasReturnableItems(o, view);
   return {
     id: o.id,
     orderNumber: o.orderNumber,
@@ -239,12 +327,17 @@ export function toOrderSummaryResponse(o: OrderSummaryRow, view?: OrderView) {
     fulfilmentStatus: o.fulfilmentStatus,
     currency: o.currency,
     grandTotal: money(o.grandTotal),
+    ...orderSnapshots(o),
     itemCount: o.items.reduce((n, i) => n + i.quantity, 0),
     createdAt: o.createdAt,
     deliveredAt: o.deliveredAt,
     estimatedDelivery: deliveryWindow(o, view),
     shipToName: o.shipRecipientName,
-    items: o.items.map(toSummaryItem),
+    items: o.items.map((i) => ({
+      ...toSummaryItem(i),
+      parentId: refs?.get(i.productId)?.parentId ?? null,
+      productSlug: refs?.get(i.productId)?.slug ?? null,
+    })),
     latestShipment: latest
       ? {
           carrier: latest.carrier ?? latest.provider,
@@ -254,12 +347,17 @@ export function toOrderSummaryResponse(o: OrderSummaryRow, view?: OrderView) {
         }
       : null,
     returnableUntil: returnableUntil(o, view),
+    hasReturnableItems: returnable,
+    // "Return by <date>" on the row, only while something can still go back.
+    returnBy: returnable ? returnableUntil(o, view) : null,
+    returns: o.returns.map((r) => ({ id: r.id, rmaNumber: r.rmaNumber, status: r.status })),
   };
 }
 
 function toSummaryItem(i: OrderItem) {
   return {
     productId: i.productId,
+    mrp: i.mrp === null ? null : money(i.mrp),
     productName: i.productName,
     variantName: i.variantName,
     color: i.color,

@@ -85,6 +85,12 @@ export function attributesOf(json: Prisma.JsonValue): Record<string, string> {
 
 const moneyOrNull = (v: Prisma.Decimal | null) => (v === null ? null : money(v));
 
+/** Published reviews per star (5 → 1). */
+export type RatingDistribution = Record<1 | 2 | 3 | 4 | 5, number>;
+
+/** Average of published reviews, 0..5 to one decimal. */
+export const ratingOf = (avg: Prisma.Decimal | number) => Math.round(Number(avg) * 10) / 10;
+
 export function toImageResponse(i: ProductImage) {
   return {
     id: i.id,
@@ -121,6 +127,8 @@ export function toParentResponse(p: ParentProduct & { subcategory?: ProductCateg
     sizeChartUrl: p.sizeChartUrl,
     infographicUrl: p.infographicUrl,
     attributes: attributesOf(p.attributes),
+    ratingAvg: ratingOf(p.ratingAvg),
+    ratingCount: p.ratingCount,
   };
 }
 
@@ -182,12 +190,18 @@ export function toSummaryResponse(p: ProductWithRelations, unitsSold = 0) {
     urlSlug: p.urlSlug,
     attributes: attributesOf(p.parent.attributes),
     unitsSold,
+    ratingAvg: ratingOf(p.parent.ratingAvg),
+    ratingCount: p.parent.ratingCount,
     merchantId: p.merchantId,
     createdAt: p.createdAt,
   };
 }
 
-export function toDetailResponse(p: ProductWithRelations, variants: ReturnType<typeof toVariantResponse>[]) {
+export function toDetailResponse(
+  p: ProductWithRelations,
+  variants: ReturnType<typeof toVariantResponse>[],
+  distribution?: RatingDistribution,
+) {
   const { department, subcategory } = taxonomyOf(p);
   return {
     id: p.id,
@@ -221,6 +235,9 @@ export function toDetailResponse(p: ProductWithRelations, variants: ReturnType<t
     category: department ? toCategoryResponse(department) : null,
     parent: toParentResponse({ ...p.parent, subcategory }),
     variants,
+    ratingAvg: ratingOf(p.parent.ratingAvg),
+    ratingCount: p.parent.ratingCount,
+    ratingDistribution: distribution ?? { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 },
     images: p.images.map(toImageResponse),
     merchantId: p.merchantId,
     createdAt: p.createdAt,

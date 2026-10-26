@@ -1,16 +1,19 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, type Promotion } from '@prisma/client';
 import { money } from '../common/api-response';
 import type { ShippingMethod } from '../common/enums';
 import type { Db } from '../db';
 import {
   lineAmounts,
-  orderTotals,
+  priceLines,
   savings,
   shippingOptions,
+  taxIsEstimate,
   type OrderTotals,
   type PricingRules,
+  type TaxDestination,
 } from '../order/pricing';
 import { primaryImageUrl } from '../product/product.mapper';
+import { toPromoResponse } from '../promo/promotion.service';
 
 /**
  * Prices cart lines — the signed-in cart, a guest's browser cart and the
@@ -20,6 +23,7 @@ import { primaryImageUrl } from '../product/product.mapper';
 
 export const CART_PRODUCT_INCLUDE = {
   images: { where: { deleted: false }, orderBy: { position: 'asc' } },
+  parent: { select: { brand: true } },
 } satisfies Prisma.ProductInclude;
 
 export type CartProduct = Prisma.ProductGetPayload<{ include: typeof CART_PRODUCT_INCLUDE }>;
@@ -42,24 +46,40 @@ export async function loadCartProducts(db: Db, ids: string[]): Promise<Map<strin
 /** Buyable right now: published and with stock (FR-ST-13). */
 export const isPurchasable = (p: Pick<CartProduct, 'status' | 'stockQuantity'>) => p.status === 'ACTIVE' && p.stockQuantity > 0;
 
+/** Σ price × qty over the buyable lines: what a promotion's minimum and percentage apply to. */
+export function purchasableSubtotal(lines: CartLine[]): Prisma.Decimal {
+  return lines
+    .filter((l) => isPurchasable(l.product))
+    .reduce((acc, l) => acc.add(l.product.price.mul(l.quantity)), new Prisma.Decimal(0));
+}
+
+/** Optional pricing context: an applied promotion (or why a code didn't apply) and where the order ships. */
+export interface CartPricingOptions {
+  promo?: Promotion | null;
+  promoError?: string | null;
+  destination?: TaxDestination | null;
+}
+
 export interface PricedCart {
   items: ReturnType<typeof toCartItem>[];
   totalItems: number;
   totals: OrderTotals;
   savings: Prisma.Decimal;
+  freeShipping: boolean;
 }
 
-function toCartItem(line: CartLine, rules: PricingRules) {
+function toCartItem(line: CartLine, amounts: ReturnType<typeof lineAmounts> | null, rules: PricingRules, destination?: TaxDestination | null) {
   const { product, quantity } = line;
-  const available = isPurchasable(product);
-  const amounts = lineAmounts(product.price, quantity, product.taxRate, rules);
   const zero = new Prisma.Decimal(0);
   // Unavailable lines stay visible but count for nothing.
-  const subtotal = available ? amounts.subtotal : zero;
+  const available = amounts !== null;
+  const shown = amounts ?? lineAmounts(product.price, quantity, product.taxRate, rules, { destination });
+  const subtotal = available ? shown.subtotal : zero;
   return {
     productId: product.id,
     productName: product.name,
     parentId: product.parentId,
+    brand: product.parent.brand,
     sku: product.sku,
     variantName: product.variantName,
     color: product.color,
@@ -68,25 +88,46 @@ function toCartItem(line: CartLine, rules: PricingRules) {
     primaryImageUrl: primaryImageUrl(product.images),
     unitPrice: money(product.price),
     mrp: product.mrp === null ? null : money(product.mrp),
-    taxRate: Number(amounts.taxRate),
+    taxRate: Number(shown.taxRate),
     quantity,
     stockQuantity: Math.max(0, product.stockQuantity),
     lineTotal: money(subtotal),
     subtotal: money(subtotal),
-    taxAmount: money(available ? amounts.taxAmount : zero),
+    discount: money(available ? shown.discount : zero),
+    taxAmount: money(available ? shown.taxAmount : zero),
     available,
   };
 }
 
-export function priceCart(lines: CartLine[], rules: PricingRules, method: ShippingMethod = 'STANDARD'): PricedCart {
+export function priceCart(
+  lines: CartLine[],
+  rules: PricingRules,
+  method: ShippingMethod = 'STANDARD',
+  options: CartPricingOptions = {},
+): PricedCart {
   const live = lines.filter((l) => isPurchasable(l.product));
-  const amounts = live.map((l) => lineAmounts(l.product.price, l.quantity, l.product.taxRate, rules));
+  const priced = priceLines(
+    live.map((l) => ({ unitPrice: l.product.price, quantity: l.quantity, taxRate: l.product.taxRate })),
+    method,
+    rules,
+    { promo: options.promo, destination: options.destination },
+  );
+  const byLine = new Map(live.map((l, i) => [l, priced.lines[i]]));
   return {
-    items: lines.map((l) => toCartItem(l, rules)),
+    items: lines.map((l) => toCartItem(l, byLine.get(l) ?? null, rules, options.destination)),
     totalItems: live.reduce((n, l) => n + l.quantity, 0),
-    totals: orderTotals(amounts, method, rules),
+    totals: priced.totals,
     savings: savings(live.map((l) => ({ unitPrice: l.product.price, mrp: l.product.mrp, quantity: l.quantity }))),
+    freeShipping: priced.freeShipping,
   };
+}
+
+const freeThresholdOf = (rules: PricingRules) =>
+  rules.shipping.freeThreshold === null ? null : money(new Prisma.Decimal(rules.shipping.freeThreshold));
+
+/** The applied code and what it took off; null without one. */
+function promoOf(options: CartPricingOptions, priced: PricedCart) {
+  return options.promo ? toPromoResponse(options.promo, priced.totals.discountTotal) : null;
 }
 
 /** `CartResponse`: the signed-in cart, or a guest preview (`cart` null). */
@@ -94,8 +135,9 @@ export function toCartResponse(
   cart: { id: string; userId: string; updatedAt: Date } | null,
   lines: CartLine[],
   rules: PricingRules,
+  options: CartPricingOptions = {},
 ) {
-  const priced = priceCart(lines, rules);
+  const priced = priceCart(lines, rules, 'STANDARD', options);
   const { totals } = priced;
   return {
     cartId: cart?.id ?? null,
@@ -104,31 +146,42 @@ export function toCartResponse(
     totalItems: priced.totalItems,
     totalPrice: money(totals.subtotal),
     savings: money(priced.savings),
+    discountTotal: money(totals.discountTotal),
+    promo: promoOf(options, priced),
+    promoError: options.promoError ?? null,
     taxTotal: money(totals.taxTotal),
+    taxIsEstimate: taxIsEstimate(rules, options.destination),
     shippingEstimate: money(totals.shippingTotal),
     grandTotalEstimate: money(totals.grandTotal),
     pricesIncludeTax: rules.pricesIncludeTax,
-    freeShippingThreshold:
-      rules.shipping.freeThreshold === null ? null : money(new Prisma.Decimal(rules.shipping.freeThreshold)),
+    freeShippingThreshold: freeThresholdOf(rules),
     updatedAt: cart?.updatedAt ?? null,
   };
 }
 
 /** `CheckoutQuote`: totals for one shipping method, plus both methods priced for this cart. */
-export function toCheckoutQuote(lines: CartLine[], method: ShippingMethod, rules: PricingRules, currency: string) {
-  const priced = priceCart(lines, rules, method);
+export function toCheckoutQuote(
+  lines: CartLine[],
+  method: ShippingMethod,
+  rules: PricingRules,
+  currency: string,
+  options: CartPricingOptions = {},
+) {
+  const priced = priceCart(lines, rules, method, options);
   const { totals } = priced;
   return {
     currency,
     shippingMethod: method,
-    shippingOptions: shippingOptions(totals.subtotal, rules.shipping).map((o) => ({ ...o, fee: money(o.fee) })),
-    freeShippingThreshold:
-      rules.shipping.freeThreshold === null ? null : money(new Prisma.Decimal(rules.shipping.freeThreshold)),
+    shippingOptions: shippingOptions(totals.subtotal, rules.shipping, priced.freeShipping).map((o) => ({ ...o, fee: money(o.fee) })),
+    freeShippingThreshold: freeThresholdOf(rules),
     subtotal: money(totals.subtotal),
     savings: money(priced.savings),
-    taxTotal: money(totals.taxTotal),
-    shippingTotal: money(totals.shippingTotal),
     discountTotal: money(totals.discountTotal),
+    promo: promoOf(options, priced),
+    promoError: options.promoError ?? null,
+    taxTotal: money(totals.taxTotal),
+    taxIsEstimate: taxIsEstimate(rules, options.destination),
+    shippingTotal: money(totals.shippingTotal),
     grandTotal: money(totals.grandTotal),
     pricesIncludeTax: rules.pricesIncludeTax,
     lines: priced.items,

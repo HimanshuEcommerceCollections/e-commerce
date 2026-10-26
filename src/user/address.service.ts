@@ -3,9 +3,44 @@ import { z } from 'zod';
 import { AddressLimitExceededError, AddressNotFoundError } from '../common/errors';
 import { flag, optionalString, requiredString } from '../common/validation';
 import { TX, type Db } from '../db';
+import { isUsState, stateCode } from '../order/state-tax';
 
-export const AddressSchema = z.object({
-  label: requiredString({ blankMessage: 'Label is required', max: 50, sizeMessage: 'Label must not exceed 50 characters' }),
+/** US ZIP or ZIP+4. */
+export const US_ZIP = /^\d{5}(-\d{4})?$/;
+
+const isUs = (country: string | null | undefined) => !country?.trim() || /^(us|usa|united states( of america)?)$/i.test(country.trim());
+
+/** "P.O. Box 12", "PO Box", "Post Office Box", "POB 4": Express carriers can't deliver there. */
+export function isPoBox(line: string | null | undefined): boolean {
+  return !!line && /\b(?:p\.?\s*o\.?\s*box|post\s+office\s+box|pob)\b/i.test(line);
+}
+
+/**
+ * US address rules (contract B4): the state is one of the 50 states or DC
+ * (code or full name), the ZIP is 5 digits or ZIP+4. Other countries pass
+ * through. `prefix` names the fields in the 400 ("shippingAddress.state").
+ */
+export function checkUsAddress(
+  a: { state?: string | null; postalCode?: string | null; country?: string | null },
+  ctx: z.RefinementCtx,
+  prefix: (string | number)[] = [],
+) {
+  if (!isUs(a.country)) return;
+  if (a.state?.trim() && !isUsState(a.state)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...prefix, 'state'], message: 'Choose a state.' });
+  }
+  if (a.postalCode?.trim() && !US_ZIP.test(a.postalCode.trim())) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: [...prefix, 'postalCode'], message: 'Enter a 5-digit ZIP code.' });
+  }
+}
+
+/** A US state stored as its 2-letter code ("oregon" → "OR"); anything else as typed. */
+export const normalizeState = (state: string, country?: string | null) =>
+  isUs(country) ? stateCode(state) ?? state.trim() : state.trim();
+
+const AddressFields = z.object({
+  /** Optional: "Home" for a first address, else "Other". */
+  label: optionalString({ max: 50, sizeMessage: 'Label must not exceed 50 characters' }),
   recipientName: requiredString({
     blankMessage: 'Recipient name is required',
     max: 200,
@@ -34,6 +69,8 @@ export const AddressSchema = z.object({
   isDefault: flag(),
 });
 
+export const AddressSchema = AddressFields.superRefine((a, ctx) => checkUsAddress(a, ctx));
+
 export type AddressInput = z.output<typeof AddressSchema>;
 
 export function toAddressResponse(a: UserAddress) {
@@ -54,15 +91,15 @@ export function toAddressResponse(a: UserAddress) {
   };
 }
 
-function fields(input: AddressInput) {
+function fields(input: AddressInput, defaultLabel: string) {
   return {
-    label: input.label,
+    label: input.label?.trim() || defaultLabel,
     recipientName: input.recipientName,
     phone: input.phone ?? null,
     addressLine1: input.addressLine1,
     addressLine2: input.addressLine2 ?? null,
     city: input.city,
-    state: input.state,
+    state: normalizeState(input.state, input.country),
     postalCode: input.postalCode,
     country: input.country,
   };
@@ -90,7 +127,9 @@ export class AddressService {
       if (makeDefault) {
         await tx.userAddress.updateMany({ where: { userId, deleted: false }, data: { isDefault: false } });
       }
-      const address = await tx.userAddress.create({ data: { userId, ...fields(input), isDefault: makeDefault } });
+      const address = await tx.userAddress.create({
+        data: { userId, ...fields(input, count === 0 ? 'Home' : 'Other'), isDefault: makeDefault },
+      });
       return toAddressResponse(address);
     }, TX.default);
   }
@@ -121,7 +160,8 @@ export class AddressService {
       }
       const updated = await tx.userAddress.update({
         where: { id },
-        data: { ...fields(input), ...(becomeDefault ? { isDefault: true } : {}) },
+        // A blank label keeps the one it had.
+        data: { ...fields(input, address.label), ...(becomeDefault ? { isDefault: true } : {}) },
       });
       return toAddressResponse(updated);
     }, TX.default);

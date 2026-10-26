@@ -26,6 +26,7 @@ import {
   toSummaryResponse,
   toVariantResponse,
   type ProductWithRelations,
+  type RatingDistribution,
 } from './product.mapper';
 
 const ImageSchema = z.object({
@@ -273,7 +274,19 @@ async function toDetail(db: Db, product: ProductWithRelations, includeUnpublishe
   const variants = siblings
     .filter((v) => includeUnpublished || v.status === 'ACTIVE')
     .map(toVariantResponse);
-  return toDetailResponse(product, variants);
+  return toDetailResponse(product, variants, await ratingDistribution(db, product.parentId));
+}
+
+/** Published reviews of a parent product per star rating (contract A5). */
+async function ratingDistribution(db: Db, parentId: string): Promise<RatingDistribution> {
+  const rows = await db.productReview.groupBy({
+    by: ['rating'],
+    where: { parentId, status: 'PUBLISHED', deleted: false },
+    _count: { _all: true },
+  });
+  const out: RatingDistribution = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
+  for (const r of rows) if (r.rating >= 1 && r.rating <= 5) out[r.rating as 1 | 2 | 3 | 4 | 5] = r._count._all;
+  return out;
 }
 
 /**

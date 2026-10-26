@@ -102,6 +102,51 @@ How it works:
 - **Uploading again** while a submission waits, or after changes were requested, updates that submission. While a reviewer has it, the upload is rejected.
 - Every decision is mailed to the seller (log-only mailer).
 
+## Admin inbox and promotions
+
+Admin only (`ROLE_ADMIN`):
+
+- `/api/admin/support-messages` and `/api/admin/seller-applications`: list (`status`, `q`, paging), detail, `PATCH { status?, adminNote? }`. Each change records `handledBy` (the admin's email) and `updatedAt`. `/api/admin/inbox/counts` gives the nav badges.
+- `/api/admin/promotions`: list, create, `PATCH`, and `DELETE`, which only deactivates. Rows carry `timesUsed`, counting orders that weren't cancelled. Codes are applied at checkout by `src/promo`.
+- `/api/admin/customers/stats`: KPI tiles and segment counts. The customer list and export accept `segment=new|repeat|none`.
+
+The public help-center and "Sell with us" POSTs share the auth rate limiter's per-IP bucket.
+
+## Storefront catalog, promotions and tax
+
+- **Search and listing** (`GET /api/products/search`): one card per parent product with disjunctive facet counts (`dept`, `g`, `type`, `brand`, `color`, `size`, `price` buckets and the attribute facets `fit`, `material`, `conn`, `diet`, `skin`, `format`, `age`, `activity`, `occasion`, `gender`, all repeatable), toggles (`inStock`, `onSale`, `new`, `featured`, `priceMin`/`priceMax`, `exclude`), sorts `rel|pop|new|asc|desc|discount|rating`, paging with `page` and `pageSize` (`size` is the size facet). Search ANDs every word across name, type, brand, section, department, colours, attributes and keywords, matches exact SKUs, maps shopper synonyms and corrects spelling unless `exact=1`. It mirrors the web client's former in-browser model (`src/product/storefront-search.ts`). One grouped SQL query loads the live parents with their variants and units sold, and the facet pass runs in memory.
+- `GET /api/products/:id/related`, `GET /api/products/recommendations?exclude=`, `GET /api/search/suggest?q=` (completions, a type-scoped suggestion, 3 products and popular searches from 30 days of `SEARCH` events).
+- **Promotions** (`src/promo`): `PERCENT`, `FIXED` or `FREE_SHIPPING` codes with dates, minimum subtotal, usage and per-customer limits and a first-order rule. `POST /api/cart/promo/validate` checks a code. Cart, preview and quote take `promoCode` and report `promo`, `promoError` and `discountTotal`. Checkout re-checks the code with the promotion row locked; a bad code is a 400 on `promoCode`. The discount is spread over the lines, and tax is charged on the discounted amounts. `npm run seed:demo` adds `WELCOME10` and `FREESHIP`.
+- **Tax** (`TAX_MODE`, default `destination`): a SKU's own rate, else the ship-to state's base rate (`src/order/state-tax.ts`, 50 states + DC, state level only), else `DEFAULT_TAX_RATE`. Cart and quote say `taxIsEstimate` until a state is known (`shippingAddress: { state }` on preview and quote, `?state=` on `GET /api/cart`). `TAX_MODE=flat` keeps the single default rate.
+- **Orders** snapshot the line MRP, `savingsTotal`, the promo code, billing street/ZIP when it differs from shipping, and the payment method once paid (Stripe card brand/last 4, wallet or PayPal; `MANUAL` under the manual gateway). Express can't ship to a P.O. box; US states and ZIPs are validated at checkout and on saved addresses, whose `label` is now optional.
+
+## Customer account: orders, returns, saved items, reviews
+
+Customer routes (`src/account/account-shopping.routes.ts`, `/api/users/me`):
+
+- `GET /summary`: tiles for the account home, plus the latest open order (else the latest order).
+- `GET /returns`: the customer's returns, with drop-off code and deadline, pickup day and window, refund target and the tracker `step` (0 started, 1 dropped off, 2 received, 3 refunded).
+- `GET /buy-again`: SKUs from delivered or refunded orders that are still on sale, newest purchase first.
+- `/saved-items`: list (with `priceDrop` since saving), `ids`, save (201, or 200 if already saved), unsave, `move-to-cart`, `merge` for hearts tapped before sign-in.
+- `/reviews`: purchases waiting for a review and the customer's reviews; `POST` (one per product, after delivery) and `DELETE` (soft).
+
+Orders (`/api/orders`): the list takes `status=open|delivered|returned|cancelled|done`, `q` (order number or item name) and `period=30d|3m|6m|YYYY`; `GET /counts` gives the tab counts; rows carry `returnBy`, `hasReturnableItems` and `returns`. `POST /:id/invoice/email` logs an `ORDER_INVOICE` message. Return requests take `refundTo` (`ORIGINAL` or `STORE_CREDIT`) and, for `PICKUP`, `pickupDate` (a weekday in the next two weeks; default the next business day).
+
+Public: `GET /api/products/:id/reviews` (parent or SKU id, `sort=recent|rating`) and `GET /api/reviews/featured`. Catalog staff moderate at `/api/admin/reviews` (`publish`, `reject`). Reviews wait for moderation unless `REVIEWS_AUTO_PUBLISH=true`; `parent_products.rating_avg`/`rating_count` are recomputed from published reviews on every change.
+
+Admins mark a parcel handed in with `POST /api/admin/returns/:id/dropped-off` (no carrier integration yet). Refunding a `STORE_CREDIT` return adds the amount to the customer's store credit (a `RETURN_REFUND` entry) instead of calling the payment gateway; it still counts in the order's refunded total.
+
+## Customer account: settings, security, credit, privacy
+
+Routes in `src/account/account-settings.routes.ts` (mounted inside `/api/users/me`) and `src/admin/gift-cards.routes.ts`:
+
+- Sessions: every sign-in (login, register, password reset, account from a guest order) creates a `user_sessions` row and puts its id in the token as `sid`. The auth middleware refuses tokens whose session was revoked (one primary-key read per request; `last_seen_at` is written at most every 5 minutes). Tokens without `sid` (older ones, or the Java server's) keep working. `rememberMe` on login (default true) picks `JWT_REMEMBER_EXPIRATION_MS` (30 days) over `JWT_EXPIRATION_MS`; responses carry `expiresAt`. `POST /api/auth/logout`, `GET /sessions` (labels like "Chrome on Windows" from the User-Agent; no location, there is no GeoIP), `DELETE /sessions/:id`, `POST /sessions/revoke-others`. `POST /password` takes `signOutOtherDevices` (default true).
+- 2-step verification: `POST /2fa/start`, `POST /2fa/confirm`, `DELETE /2fa`. Codes (6 digits, 10 minutes, 5 tries, hashed) are "texted" through the log-only mailer as `OTP_CODE` notifications addressed to the phone: there is no SMS provider yet. With `TWO_FACTOR_ENFORCE=true` login answers `{ twoFactorRequired, challengeId, phoneMasked }` and `POST /api/auth/login/verify` finishes it.
+- `GET/PATCH /notification-preferences`, `POST /notification-preferences/unsubscribe-all`. "Deals" is `users.marketing_opt_in`.
+- Store credit: `GET /store-credit`; `POST /store-credit/redeem` (gift card number + PIN, 5 tries per 15 minutes per customer). Gift cards store only the SHA-256 of the code and a bcrypt hash of the PIN. Admins: `POST/GET /api/admin/gift-cards` (code and PIN shown once), `POST /api/admin/customers/:id/store-credit` (signed amount). `applyStoreCredit` in `src/account/store-credit.service.ts` is the ledger helper. Spending credit at checkout is not built yet.
+- Saved payment methods (`/payment-methods`, `setup-intent`, `:id/default`): Stripe customers + SetupIntents through the gateway's `savedPaymentMethods` vault; only `pm_…` ids are accepted, never card numbers. Under the manual gateway every route answers 501.
+- Privacy: `POST /data-export` (built synchronously, kept 7 days, link emailed as `DATA_EXPORT`; a request from the last 48 hours is reused), `GET /data-export`, `GET /data-export/:id/download?token=`; `POST /delete` `{ confirm: "DELETE", password }` refuses while orders or returns are open, then forfeits credit, revokes sessions, removes addresses, saved items, reviews (soft) and saved cards, and anonymises and disables the user. Order rows stay.
+
 ## Differences from the Java server
 
 Verified by running both servers against one database and diffing responses for the same requests, covering reads, errors, the cart → checkout → cancel flow and catalog import. Everything matched except:

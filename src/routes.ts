@@ -1,12 +1,20 @@
 import express, { Router } from 'express';
 import { assertRole, currentUser, requireAuth, requireRole } from './auth/auth.middleware';
+import { clientInfo } from './account/account-settings.routes';
 import {
   LoginSchema,
+  LoginVerifySchema,
   PasswordResetConfirmSchema,
   PasswordResetRequestSchema,
   RegisterSchema,
 } from './auth/auth.service';
-import { CartItemSchema, CartItemUpdateSchema, CartLinesBodySchema } from './cart/cart.service';
+import {
+  CartItemSchema,
+  CartItemUpdateSchema,
+  CartLinesBodySchema,
+  CartPreviewSchema,
+  PromoValidateSchema,
+} from './cart/cart.service';
 import { created, noContent, ok } from './common/api-response';
 import { SellerReviewRequiredError } from './common/errors';
 import { ORDER_STATUSES } from './common/enums';
@@ -14,7 +22,7 @@ import { parsePageable } from './common/pagination';
 import { parseBody, pathUuid, ValidationError } from './common/validation';
 import type { Container } from './container';
 import { storeConfig } from './store/store-config';
-import { CheckoutSchema, ORDER_SORTS, ReturnRequestSchema, type OrderListFilter } from './order/order.service';
+import { CheckoutSchema, ORDER_SORTS, parseOrderListQuery, ReturnRequestSchema } from './order/order.service';
 import { CategoryCreateSchema } from './product/category.service';
 import { PRODUCT_SORTS, ProductCreateSchema, ProductUpdateSchema } from './product/product.service';
 import { AddressSchema } from './user/address.service';
@@ -38,11 +46,21 @@ const isCatalogStaff = (user: { role: string } | undefined) =>
 export function authRoutes(c: Container): Router {
   const r = Router();
   r.post('/register', async (req, res) => {
-    const data = await c.auth.register(parseBody(RegisterSchema, req.body));
+    const data = await c.auth.register(parseBody(RegisterSchema, req.body), clientInfo(req));
     res.status(201).json(created(data, 'Account registered successfully'));
   });
   r.post('/login', async (req, res) => {
-    res.json(ok(await c.auth.login(parseBody(LoginSchema, req.body)), 'Login successful'));
+    const data = await c.auth.login(parseBody(LoginSchema, req.body), clientInfo(req));
+    res.json(ok(data, 'twoFactorRequired' in data ? 'Enter the code we texted you' : 'Login successful'));
+  });
+  /** Step two when TWO_FACTOR_ENFORCE=true. */
+  r.post('/login/verify', async (req, res) => {
+    res.json(ok(await c.auth.verifyLogin(parseBody(LoginVerifySchema, req.body), clientInfo(req)), 'Login successful'));
+  });
+  /** Signs this device out: its session stops working. */
+  r.post('/logout', requireAuth, async (req, res) => {
+    await c.auth.logout(currentUser(req), req.sessionId);
+    res.json(noContent('Signed out'));
   });
   /** Always the same answer, so it never reveals whether an account exists. */
   r.post('/password-reset/request', async (req, res) => {
@@ -50,7 +68,7 @@ export function authRoutes(c: Container): Router {
     res.json(noContent('If an account exists for that email, a reset link is on its way'));
   });
   r.post('/password-reset/confirm', async (req, res) => {
-    const data = await c.auth.confirmPasswordReset(parseBody(PasswordResetConfirmSchema, req.body));
+    const data = await c.auth.confirmPasswordReset(parseBody(PasswordResetConfirmSchema, req.body), clientInfo(req));
     res.json(ok(data, 'Password updated'));
   });
   return r;
@@ -152,7 +170,20 @@ export function cartRoutes(c: Container): Router {
   const r = Router();
   /** Public: prices a guest's browser cart (FR-ST-09). */
   r.post('/preview', async (req, res) => {
-    res.json(ok(await c.cart.preview(parseBody(CartLinesBodySchema, req.body).items)));
+    const input = parseBody(CartPreviewSchema, req.body);
+    const userId = req.user?.role === 'ROLE_CUSTOMER' ? req.user.id : null;
+    const data = await c.cart.preview(input.items, {
+      promoCode: input.promoCode,
+      customer: { userId, email: input.email },
+      destination: input.shippingAddress,
+    });
+    res.json(ok(data));
+  });
+  /** Public: checks a promo code against the given lines (or the signed-in cart); 400 on `code`. */
+  r.post('/promo/validate', async (req, res) => {
+    const input = parseBody(PromoValidateSchema, req.body);
+    const userId = req.user?.role === 'ROLE_CUSTOMER' ? req.user.id : null;
+    res.json(ok(await c.cart.validatePromo(input.code, input.items, { userId, email: input.email }), 'Promo code applied'));
   });
   r.use(requireAuth);
   const customer = requireRole('ROLE_CUSTOMER');
@@ -162,7 +193,10 @@ export function cartRoutes(c: Container): Router {
     res.json(ok(await c.cart.merge(assertRole(req, 'ROLE_CUSTOMER').id, items), 'Cart merged'));
   });
   r.get('/', customer, async (req, res) => {
-    res.json(ok(await c.cart.getCart(currentUser(req).id)));
+    const q = (name: string) => (typeof req.query[name] === 'string' && req.query[name] ? String(req.query[name]).slice(0, 100) : undefined);
+    const promoCode = q('promoCode');
+    const state = q('state');
+    res.json(ok(await c.cart.getCart(currentUser(req).id, { promoCode, destination: state ? { state, postalCode: q('postalCode') } : null })));
   });
   r.post('/items', async (req, res) => {
     const input = parseBody(CartItemSchema, req.body);
@@ -197,13 +231,19 @@ export function orderRoutes(c: Container): Router {
     const data = await c.orders.checkout(user.id, input, req.header('Idempotency-Key'));
     res.status(201).json(created(data, 'Order placed successfully'));
   });
+  /** ?status=open|delivered|returned|cancelled|done &q= (order number or item name) &period=30d|3m|6m|YYYY */
   r.get('/', customer, async (req, res) => {
     const pageable = parsePageable(req, { sort: 'createdAt,desc', allowedSorts: ORDER_SORTS });
-    const status = req.query.status;
-    if (status !== undefined && status !== 'open' && status !== 'done') {
-      throw new ValidationError({ status: 'must be one of open, done' });
-    }
-    res.json(ok(await c.orders.findMyOrders(currentUser(req).id, pageable, status as OrderListFilter | undefined)));
+    res.json(ok(await c.orders.findMyOrders(currentUser(req).id, pageable, parseOrderListQuery(req.query))));
+  });
+  // Before '/:id', or "counts" would be taken for an order number.
+  r.get('/counts', customer, async (req, res) => {
+    const { q, period } = parseOrderListQuery({ q: req.query.q, period: req.query.period });
+    res.json(ok(await c.orders.countMyOrders(currentUser(req).id, { q, period })));
+  });
+  r.post('/:id/invoice/email', customer, async (req, res) => {
+    await c.orders.emailInvoice(currentUser(req), orderRef(req.params.id));
+    res.status(202).json(noContent('Invoice sent'));
   });
   // ':id' is the order id or its number (EC-1234567).
   r.get('/:id', customer, async (req, res) => {

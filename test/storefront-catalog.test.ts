@@ -241,6 +241,16 @@ describe('store config', () => {
       lowStockThreshold: 5,
       paymentProvider: 'manual',
       stripePublishableKey: null,
+      // Contract E (checked in destination-tax.test.ts).
+      taxMode: 'destination',
+      savedPaymentMethods: false,
+      reviewsEnabled: true,
+      supportHours: '8 AM – 8 PM ET',
+      returnCarrier: 'UPS',
+      promoCodesEnabled: true,
+      twoFactorAvailable: true,
+      smsAvailable: false,
+      stripePublishableKeyIsTest: false,
     });
   });
 });

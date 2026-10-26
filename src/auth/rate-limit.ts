@@ -15,7 +15,8 @@ interface Bucket {
   updatedAt: number;
 }
 
-export const RATE_LIMITED_PATHS = ['/api/auth/', '/api/orders/track'] as const;
+/** The public help-center and "Sell with us" forms are here too: each POST stores a row and sends an email. */
+export const RATE_LIMITED_PATHS = ['/api/auth/', '/api/orders/track', '/api/support/', '/api/seller-applications'] as const;
 
 export function authRateLimit(options: {
   enabled: boolean;
@@ -57,5 +58,43 @@ export function authRateLimit(options: {
       return;
     }
     res.status(429).json(failure('Too many requests — try again shortly'));
+  };
+}
+
+/**
+ * Per-user token bucket for a signed-in action that guesses a secret (gift
+ * card redeem: 5 tries per 15 minutes). Mount behind requireAuth; always on,
+ * independent of RATE_LIMIT_ENABLED, because the secret is short. In-memory,
+ * per instance, LRU-bounded like the limiter above.
+ */
+export function userRateLimit(options: { capacity: number; windowMs: number }): RequestHandler {
+  const buckets = new Map<string, Bucket>();
+  const refillPerMs = options.capacity / options.windowMs;
+
+  return (req, res, next) => {
+    const key = req.user?.id;
+    if (!key) {
+      next();
+      return;
+    }
+    const now = Date.now();
+    let bucket = buckets.get(key);
+    if (bucket) {
+      buckets.delete(key);
+      bucket.tokens = Math.min(options.capacity, bucket.tokens + (now - bucket.updatedAt) * refillPerMs);
+      bucket.updatedAt = now;
+    } else {
+      bucket = { tokens: options.capacity, updatedAt: now };
+    }
+    buckets.set(key, bucket);
+    if (buckets.size > MAX_TRACKED_CLIENTS) {
+      buckets.delete(buckets.keys().next().value!);
+    }
+    if (bucket.tokens >= 1) {
+      bucket.tokens -= 1;
+      next();
+      return;
+    }
+    res.status(429).json(failure('Too many attempts. Try again in a few minutes.'));
   };
 }

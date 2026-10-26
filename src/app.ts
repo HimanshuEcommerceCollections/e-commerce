@@ -7,6 +7,12 @@ import type { Container } from './container';
 import { adminCatalogRoutes } from './admin/catalog.routes';
 import { adminSubmissionRoutes, sellerRoutes } from './seller/seller.routes';
 import { adminOpsRoutes } from './admin/ops.routes';
+import { adminInboxRoutes } from './admin/inbox.routes';
+import { adminPromotionRoutes } from './admin/promotions.routes';
+import { adminReviewRoutes } from './admin/reviews.routes';
+import { adminGiftCardRoutes } from './admin/gift-cards.routes';
+import { accountShoppingRoutes, productReviewRoutes, reviewRoutes } from './account/account-shopping.routes';
+import { searchRoutes, storefrontProductRoutes } from './product/storefront.routes';
 import { catalogRoutes } from './product/catalog.routes';
 import {
   accountRoutes,
@@ -60,9 +66,14 @@ export function createApp(c: Container): Express {
   app.use('/api/auth', authRoutes(c));
   app.use('/api/store', storeRoutes(c));
   app.use('/api/categories', categoryRoutes(c));
+  app.use('/api/products', storefrontProductRoutes(c));
+  app.use('/api/search', searchRoutes(c));
+  app.use('/api/products', productReviewRoutes(c));
   app.use('/api/products', productRoutes(c));
+  app.use('/api/reviews', reviewRoutes(c));
   app.use('/api/catalog', catalogRoutes(c));
   app.use('/api/users/me/addresses', addressRoutes(c));
+  app.use('/api/users/me', accountShoppingRoutes(c));
   app.use('/api/users/me', accountRoutes(c));
   app.use('/api/cart', cartRoutes(c));
   app.use('/api/checkout', checkoutRoutes(c));
@@ -74,6 +85,10 @@ export function createApp(c: Container): Express {
   app.use('/api/analytics', analyticsRoutes(c));
   // Admin-only operations first: their per-route guards let catalog paths fall through.
   app.use('/api/admin', adminOpsRoutes(c));
+  app.use('/api/admin', adminInboxRoutes(c));
+  app.use('/api/admin', adminPromotionRoutes(c));
+  app.use('/api/admin', adminReviewRoutes(c));
+  app.use('/api/admin', adminGiftCardRoutes(c));
   app.use('/api/admin', adminCatalogRoutes(c));
   app.use('/api/admin', adminSubmissionRoutes(c));
   app.use('/api/seller', sellerRoutes(c));

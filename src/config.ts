@@ -89,6 +89,10 @@ const EnvSchema = z.object({
     .string({ required_error: 'JWT_SECRET is required' })
     .refine((s) => Buffer.byteLength(s, 'utf8') >= 32, 'JWT_SECRET must be at least 32 bytes (256 bits)'),
   JWT_EXPIRATION_MS: int(86_400_000),
+  // "Keep me signed in" (the login default): 30 days.
+  JWT_REMEMBER_EXPIRATION_MS: int(2_592_000_000),
+  // Ask enrolled customers for their texted code at sign-in.
+  TWO_FACTOR_ENFORCE: bool(false),
 
   CORS_ALLOWED_ORIGINS: z.string().default('http://localhost:3000'),
   // 'framework' or 'native' (Spring's values) trust X-Forwarded-For from a
@@ -121,6 +125,9 @@ const EnvSchema = z.object({
   APP_BASE_URL: z.string().url().default('http://localhost:3000'),
   PRICES_INCLUDE_TAX: bool(false),
   DEFAULT_TAX_RATE: percent('0'),
+  // destination: SKU rate, else the ship-to state's base rate (src/order/state-tax.ts),
+  // else DEFAULT_TAX_RATE. flat: SKU rate, else DEFAULT_TAX_RATE.
+  TAX_MODE: z.enum(['destination', 'flat']).default('destination'),
   LOW_STOCK_THRESHOLD: int(5),
   SHIPPING_STANDARD_FEE: amount('5.99'),
   SHIPPING_STANDARD_DAYS: dayRange('3-5'),
@@ -130,6 +137,8 @@ const EnvSchema = z.object({
   // Only the manual provider exists; the name keeps room for a real carrier.
   SHIPPING_PROVIDER: z.enum(['manual']).default('manual'),
   RETURN_WINDOW_DAYS: int(30),
+  // Customer reviews go live without moderation.
+  REVIEWS_AUTO_PUBLISH: bool(false),
   STRIPE_PUBLISHABLE_KEY: z.string().default(''),
   MAIL_PROVIDER: z.enum(['log']).default('log'),
   IMAGE_CHECKS_ENABLED: bool(true),
@@ -148,7 +157,8 @@ export interface ShippingRate {
 export interface Config {
   port: number;
   databaseUrl: string;
-  jwt: { secret: string; expirationMs: number };
+  jwt: { secret: string; expirationMs: number; rememberExpirationMs: number };
+  twoFactor: { enforce: boolean };
   cors: { allowedOrigins: string[] };
   trustProxy: boolean;
   address: { maxPerUser: number };
@@ -172,6 +182,8 @@ export interface Config {
     pricesIncludeTax: boolean;
     /** Percent as a two-decimal string; applies when a SKU has no tax rate. */
     defaultTaxRate: string;
+    /** destination: rate by ship-to state when known; flat: one store-wide default. */
+    taxMode: 'destination' | 'flat';
   };
   inventory: { lowStockThreshold: number };
   shipping: {
@@ -182,6 +194,7 @@ export interface Config {
     freeThreshold: string | null;
   };
   returns: { windowDays: number };
+  reviews: { autoPublish: boolean };
   mail: { provider: 'log' };
   imageChecks: { enabled: boolean; timeoutMs: number };
   passwordReset: { ttlMinutes: number };
@@ -213,7 +226,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     port: e.SERVER_PORT,
     databaseUrl,
-    jwt: { secret: e.JWT_SECRET, expirationMs: e.JWT_EXPIRATION_MS },
+    jwt: { secret: e.JWT_SECRET, expirationMs: e.JWT_EXPIRATION_MS, rememberExpirationMs: e.JWT_REMEMBER_EXPIRATION_MS },
+    twoFactor: { enforce: e.TWO_FACTOR_ENFORCE },
     cors: {
       allowedOrigins: e.CORS_ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean),
     },
@@ -245,7 +259,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     },
     logLevel: e.LOG_LEVEL,
     store: { name: e.STORE_NAME, appBaseUrl: e.APP_BASE_URL.replace(/\/+$/, '') },
-    pricing: { pricesIncludeTax: e.PRICES_INCLUDE_TAX, defaultTaxRate: e.DEFAULT_TAX_RATE },
+    pricing: { pricesIncludeTax: e.PRICES_INCLUDE_TAX, defaultTaxRate: e.DEFAULT_TAX_RATE, taxMode: e.TAX_MODE },
     inventory: { lowStockThreshold: e.LOW_STOCK_THRESHOLD },
     shipping: {
       provider: e.SHIPPING_PROVIDER,
@@ -254,6 +268,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       freeThreshold: freeShippingDisabled ? null : e.SHIPPING_FREE_THRESHOLD,
     },
     returns: { windowDays: e.RETURN_WINDOW_DAYS },
+    reviews: { autoPublish: e.REVIEWS_AUTO_PUBLISH },
     mail: { provider: e.MAIL_PROVIDER },
     imageChecks: { enabled: e.IMAGE_CHECKS_ENABLED, timeoutMs: e.IMAGE_CHECK_TIMEOUT_MS },
     passwordReset: { ttlMinutes: e.PASSWORD_RESET_TTL_MINUTES },

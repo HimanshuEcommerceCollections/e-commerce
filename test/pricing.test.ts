@@ -26,7 +26,7 @@ describe('config', () => {
     expect(c.shipping.standard).toEqual({ fee: '5.99', minDays: 4, maxDays: 6 });
     expect(c.shipping.express).toEqual({ fee: '12.50', minDays: 2, maxDays: 2 });
     expect(c.shipping.freeThreshold).toBe('35.00');
-    expect(c.pricing).toEqual({ pricesIncludeTax: false, defaultTaxRate: '0.00' });
+    expect(c.pricing).toEqual({ pricesIncludeTax: false, defaultTaxRate: '0.00', taxMode: 'destination' });
     expect(c.store.name).toBe('Ecommerce Collections');
   });
 

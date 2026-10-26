@@ -1,11 +1,11 @@
-import { createHash, createHmac } from 'node:crypto';
-import type { PrismaClient } from '@prisma/client';
+import { createHash, createHmac, randomInt } from 'node:crypto';
+import { Prisma, type PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { reconcileProviderRefund } from '../admin/refund-reconciliation';
 import type { AnalyticsService } from '../analytics/analytics.service';
 import { CART_PRODUCT_INCLUDE, type CartProduct } from '../cart/cart-pricing';
 import { CartLinesSchema, type CartLineInput } from '../cart/cart.service';
-import { RETURN_METHODS, SHIPPING_METHODS, type OrderStatus, type ShippingMethod } from '../common/enums';
+import { RETURN_METHODS, RETURN_REFUND_TARGETS, SHIPPING_METHODS, type OrderStatus, type ShippingMethod } from '../common/enums';
 import {
   AddressNotFoundError,
   DomainError,
@@ -30,6 +30,7 @@ import {
   optionalUuid,
   requiredString,
   requiredUuid,
+  ValidationError,
 } from '../common/validation';
 import type { Config } from '../config';
 import { TX, type Db } from '../db';
@@ -37,7 +38,9 @@ import type { Mailer } from '../notify/mailer';
 import type { PaymentEventHandler, PaymentGateway } from '../payment/gateway';
 import { toMinorUnits } from '../payment/money-units';
 import { primaryImageUrl } from '../product/product.mapper';
-import { saveCheckoutAddress } from '../user/address.service';
+import { promoCodeField, resolvePromotion } from '../promo/promotion.service';
+import { checkUsAddress, isPoBox, normalizeState, saveCheckoutAddress, US_ZIP } from '../user/address.service';
+import { TaxDestinationSchema } from '../cart/cart.service';
 import {
   orderCancelledMail,
   orderPlacedMail,
@@ -72,14 +75,14 @@ import {
   restock,
   takeStock,
 } from './order.repository';
-import { lineAmounts, orderTotals, pricingRules, type LineAmounts, type PricingRules } from './pricing';
+import { priceLines, pricingRules, savings, type LineAmounts, type PricingRules } from './pricing';
 
 const log = logger('orders');
 
 // ── Request schemas ─────────────────────────────────────────────────────────
 
 /** A shipping address typed at checkout (country defaults to US). */
-export const ShippingAddressInputSchema = z.object(
+const ShippingAddressFields = z.object(
   {
     recipientName: requiredString({
       blankMessage: 'Recipient name is required',
@@ -110,9 +113,55 @@ export const ShippingAddressInputSchema = z.object(
   { required_error: 'Shipping address is required', invalid_type_error: 'Shipping address must be an object' },
 );
 
+/** US addresses: a state of the 50 + DC and a 5-digit ZIP (contract B4). */
+export const ShippingAddressInputSchema = ShippingAddressFields.superRefine((a, ctx) => checkUsAddress(a, ctx));
+
 export type ShippingAddressInput = z.output<typeof ShippingAddressInputSchema>;
 
 const nullToUndefined = (v: unknown) => (v === null ? undefined : v);
+
+/** Card billing address when it differs from shipping (street and ZIP are all the card check needs). */
+const BillingAddressSchema = z.preprocess(
+  nullToUndefined,
+  z
+    .object({
+      addressLine1: optionalString({ max: 255, sizeMessage: 'Address line 1 must not exceed 255 characters' }),
+      postalCode: optionalString({ max: 20 }),
+    })
+    .optional(),
+);
+
+/** Fields every checkout takes besides the address: promo code and billing (contract B1, B3). */
+const checkoutExtras = {
+  promoCode: promoCodeField(),
+  billingSameAsShipping: z.preprocess((v) => (v === null || v === undefined ? true : v), flag()),
+  billingAddress: BillingAddressSchema,
+};
+
+/** Billing street and ZIP when not the same as shipping; no P.O. box for Express. */
+function checkBillingAndMethod(
+  v: {
+    billingSameAsShipping: boolean;
+    billingAddress?: { addressLine1?: string; postalCode?: string };
+    shippingAddress?: { addressLine1: string };
+    shippingMethod?: ShippingMethod;
+  },
+  ctx: z.RefinementCtx,
+) {
+  if (!v.billingSameAsShipping) {
+    if (!v.billingAddress?.addressLine1?.trim()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['billingAddress', 'addressLine1'], message: 'Enter your billing street address.' });
+    }
+    if (!US_ZIP.test(v.billingAddress?.postalCode?.trim() ?? '')) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['billingAddress', 'postalCode'], message: 'Enter a 5-digit billing ZIP code.' });
+    }
+  }
+  if (v.shippingMethod === 'EXPRESS' && isPoBox(v.shippingAddress?.addressLine1)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['shippingAddress', 'addressLine1'], message: PO_BOX_EXPRESS });
+  }
+}
+
+const PO_BOX_EXPRESS = "We can't ship Express to a P.O. box.";
 
 /** Signed-in checkout: a saved address, or one typed in (optionally saved). */
 export const CheckoutSchema = z
@@ -121,8 +170,10 @@ export const CheckoutSchema = z
     shippingAddress: z.preprocess(nullToUndefined, ShippingAddressInputSchema.optional()),
     saveAddress: flag(),
     shippingMethod: oneOf(SHIPPING_METHODS),
+    ...checkoutExtras,
   })
   .superRefine((v, ctx) => {
+    checkBillingAndMethod(v, ctx);
     if (!v.addressId && !v.shippingAddress) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['addressId'], message: 'Shipping address id is required' });
     } else if (v.addressId && v.shippingAddress) {
@@ -139,6 +190,10 @@ export interface CheckoutInput {
   shippingAddress?: ShippingAddressInput;
   saveAddress?: boolean;
   shippingMethod?: ShippingMethod;
+  promoCode?: string;
+  /** Default true. */
+  billingSameAsShipping?: boolean;
+  billingAddress?: { addressLine1?: string; postalCode?: string };
 }
 
 export const GuestCheckoutSchema = z.object({
@@ -153,14 +208,22 @@ export const GuestCheckoutSchema = z.object({
   shippingAddress: z.preprocess(nullToUndefined, ShippingAddressInputSchema),
   shippingMethod: oneOf(SHIPPING_METHODS),
   items: z.preprocess(nullToUndefined, CartLinesSchema.min(1, 'Your cart is empty')),
-});
+  ...checkoutExtras,
+}).superRefine(checkBillingAndMethod);
 
 export type GuestCheckoutInput = z.output<typeof GuestCheckoutSchema>;
 
-/** Checkout quote: the caller's lines, or (signed in, no lines) the server cart. */
+/**
+ * Checkout quote: the caller's lines, or (signed in, no lines) the server
+ * cart; an optional promo code (and the guest's email for first-order codes)
+ * and ship-to state for destination tax.
+ */
 export const QuoteSchema = z.object({
   items: z.preprocess(nullToUndefined, CartLinesSchema.optional()),
   shippingMethod: oneOf(SHIPPING_METHODS),
+  promoCode: promoCodeField(),
+  email: optionalString({ max: 255 }),
+  shippingAddress: TaxDestinationSchema,
 });
 
 export const ReturnRequestSchema = z.object({
@@ -176,8 +239,46 @@ export const ReturnRequestSchema = z.object({
     .max(100),
   reason: requiredString({ blankMessage: 'Reason is required', max: 1000, sizeMessage: 'Reason must not exceed 1000 characters' }),
   method: oneOf(RETURN_METHODS),
+  refundTo: oneOf(RETURN_REFUND_TARGETS),
+  /** PICKUP only: a weekday in the next two weeks (default: the next business day). */
+  pickupDate: optionalString({ pattern: /^\d{4}-\d{2}-\d{2}(T.*)?$/, patternMessage: 'Choose a pickup date.' }),
 });
 
+/** Drop off within two weeks; pickups come between these hours. */
+const DROPOFF_DAYS = 14;
+const PICKUP_WINDOW = '9 AM – 7 PM';
+const PICKUP_HORIZON_DAYS = 14;
+const DAY_MS = 86_400_000;
+
+/** UTC midnight of `d` plus `days`. */
+const utcDay = (d: Date, days = 0) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + days));
+const isWeekend = (d: Date) => d.getUTCDay() === 0 || d.getUTCDay() === 6;
+
+/** The requested pickup day (validated), or the next business day. */
+export function pickupDay(requested: string | undefined, now = new Date()): Date {
+  const today = utcDay(now);
+  if (requested === undefined) {
+    let day = utcDay(now, 1);
+    while (isWeekend(day)) day = utcDay(day, 1);
+    return day;
+  }
+  const day = new Date(`${requested.slice(0, 10)}T00:00:00Z`);
+  const days = (day.getTime() - today.getTime()) / DAY_MS;
+  if (Number.isNaN(day.getTime()) || days < 1 || days > PICKUP_HORIZON_DAYS || isWeekend(day)) {
+    throw new ValidationError({ pickupDate: 'Choose a weekday in the next 2 weeks.' });
+  }
+  return day;
+}
+
+/** Shown as a QR code at the UPS counter: the RMA number plus 6 random characters. */
+function dropoffCode(rmaNumber: string) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let suffix = '';
+  for (let i = 0; i < 6; i++) suffix += alphabet[randomInt(alphabet.length)];
+  return `${rmaNumber}-${suffix}`;
+}
+
+/** Order number plus the order's email or a ZIP (shipping or billing). */
 export const TrackOrderSchema = z.object({
   orderNumber: requiredString({ blankMessage: 'Order number is required', max: 40, sizeMessage: 'Order number must not exceed 40 characters' }),
   emailOrZip: requiredString({ blankMessage: 'Email or ZIP code is required', max: 255, sizeMessage: 'size must be between 0 and 255' }),
@@ -185,9 +286,86 @@ export const TrackOrderSchema = z.object({
 
 export const ORDER_SORTS = ['createdAt', 'updatedAt', 'orderNumber', 'grandTotal', 'status'] as const;
 
-/** Account order list filter: open = still on its way; done = finished one way or another. */
-export type OrderListFilter = 'open' | 'done';
+/**
+ * Account order list tabs: open = still on its way; delivered = arrived, nothing
+ * sent back; returned = a (not rejected) return or fully refunded; cancelled;
+ * done = finished one way or another (kept for older clients).
+ */
+export const ORDER_LIST_FILTERS = ['open', 'delivered', 'returned', 'cancelled', 'done'] as const;
+export type OrderListFilter = (typeof ORDER_LIST_FILTERS)[number];
 const DONE_STATUSES: OrderStatus[] = ['DELIVERED', 'CANCELLED', 'REFUNDED', 'PAYMENT_FAILED'];
+const OPEN_STATUSES: OrderStatus[] = ['PENDING_PAYMENT', 'PAID', 'CONFIRMED', 'SHIPPED'];
+const CANCELLED_STATUSES: OrderStatus[] = ['CANCELLED', 'PAYMENT_FAILED'];
+
+/** Account order list query: tab, search (order number or item name) and period (30d, 3m, 6m or a year). */
+export interface OrderListQuery {
+  status?: OrderListFilter;
+  q?: string;
+  period?: string;
+}
+
+/** `?status=&q=&period=` from the query string; a bad value is a 400 on that field. */
+export function parseOrderListQuery(query: Record<string, unknown>): OrderListQuery {
+  const str = (name: string) => {
+    const v = query[name];
+    return typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+  };
+  const status = str('status');
+  if (status !== undefined && !(ORDER_LIST_FILTERS as readonly string[]).includes(status)) {
+    throw new ValidationError({ status: `must be one of ${ORDER_LIST_FILTERS.join(', ')}` });
+  }
+  const period = str('period');
+  if (period !== undefined) periodRange(period);
+  const q = str('q');
+  if (q !== undefined && q.length > 100) throw new ValidationError({ q: 'size must be between 0 and 100' });
+  return { status: status as OrderListFilter | undefined, q, period };
+}
+
+function periodRange(period: string, now = new Date()): { gte: Date; lt?: Date } {
+  const months = { '3m': 3, '6m': 6 }[period];
+  if (period === '30d') return { gte: new Date(now.getTime() - 30 * DAY_MS) };
+  if (months) return { gte: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - months, now.getUTCDate())) };
+  if (/^\d{4}$/.test(period)) {
+    const year = Number(period);
+    return { gte: new Date(Date.UTC(year, 0, 1)), lt: new Date(Date.UTC(year + 1, 0, 1)) };
+  }
+  throw new ValidationError({ period: 'must be one of 30d, 3m, 6m or a year (YYYY)' });
+}
+
+/** A return that counts for the tabs: anything but a rejected request. */
+const COUNTED_RETURN = { status: { not: 'REJECTED' } } satisfies Prisma.OrderReturnWhereInput;
+
+function tabWhere(status: OrderListFilter | undefined): Prisma.OrderWhereInput {
+  switch (status) {
+    case 'open':
+      return { status: { in: OPEN_STATUSES } };
+    case 'delivered':
+      return { status: 'DELIVERED', returns: { none: COUNTED_RETURN } };
+    case 'returned':
+      return { OR: [{ status: 'REFUNDED' }, { status: 'DELIVERED', returns: { some: COUNTED_RETURN } }] };
+    case 'cancelled':
+      return { status: { in: CANCELLED_STATUSES } };
+    case 'done':
+      return { status: { in: DONE_STATUSES } };
+    default:
+      return {};
+  }
+}
+
+function orderListWhere(userId: string, query: OrderListQuery): Prisma.OrderWhereInput {
+  const and: Prisma.OrderWhereInput[] = [tabWhere(query.status)];
+  if (query.period) and.push({ createdAt: periodRange(query.period) });
+  if (query.q) {
+    and.push({
+      OR: [
+        { orderNumber: { contains: query.q, mode: 'insensitive' } },
+        { orderNumber: normalizeOrderNumber(query.q) },
+        { items: { some: { deleted: false, productName: { contains: query.q, mode: 'insensitive' } } } },
+      ],
+    });
+  }
+  return { userId, deleted: false, AND: and };
+}
 
 const KEY_PATTERN = /^[A-Za-z0-9_-]{1,80}$/;
 
@@ -217,6 +395,24 @@ interface Placement {
   guestTokenHash: string | null;
   /** Timeline / stock-movement actor: CUSTOMER or GUEST. */
   actor: string;
+  promoCode: string | null;
+  billing: { same: boolean; addressLine1: string | null; postalCode: string | null };
+}
+
+/** Billing as stored: nothing extra when it is the shipping address. */
+function billingOf(input: { billingSameAsShipping?: boolean; billingAddress?: { addressLine1?: string; postalCode?: string } }) {
+  const same = input.billingSameAsShipping ?? true;
+  return same
+    ? { same, addressLine1: null, postalCode: null }
+    : { same, addressLine1: input.billingAddress?.addressLine1?.trim() || null, postalCode: input.billingAddress?.postalCode?.trim() || null };
+}
+
+/** Part of the idempotency hash only when set, so earlier requests keep their hash. */
+function extrasHash(input: { promoCode?: string } & Parameters<typeof billingOf>[0]) {
+  const extras: Record<string, unknown> = {};
+  if (input.promoCode?.trim()) extras.p = input.promoCode.trim().toUpperCase();
+  if (input.billingSameAsShipping === false) extras.b = billingOf(input);
+  return Object.keys(extras).length ? JSON.stringify(extras) : '';
 }
 
 interface AddressSnapshot {
@@ -285,14 +481,17 @@ export class OrderService implements PaymentEventHandler {
       method,
       guestTokenHash: null,
       actor: 'CUSTOMER',
+      promoCode: input.promoCode?.trim() || null,
+      billing: billingOf(input),
     };
     if (!key) return this.place(placement, null);
 
     // The cart is server state (and consumed by the first checkout), so only
     // the client-controlled body is hashed.
-    const body = input.shippingAddress
-      ? JSON.stringify({ a: normalizeAddress(input.shippingAddress), s: input.saveAddress ?? false, m: method })
-      : `${input.addressId}:${method}`;
+    const body =
+      (input.shippingAddress
+        ? JSON.stringify({ a: normalizeAddress(input.shippingAddress), s: input.saveAddress ?? false, m: method })
+        : `${input.addressId}:${method}`) + extrasHash(input);
     const hash = sha256(`${userId}:${body}`);
     const where = { userId, idempotencyKey: key };
     return this.withReplay(where, hash, () => this.place(placement, { key, hash }), true);
@@ -314,7 +513,8 @@ export class OrderService implements PaymentEventHandler {
     const token = createHmac('sha256', this.guestTokenSecret).update(`${email}\n${key}`).digest('base64url');
 
     const hash = sha256(
-      JSON.stringify({ email, items, a: normalizeAddress(input.shippingAddress), m: method, o: input.marketingOptIn }),
+      JSON.stringify({ email, items, a: normalizeAddress(input.shippingAddress), m: method, o: input.marketingOptIn }) +
+        extrasHash(input),
     );
     const result = await this.withReplay(
       { userId: null, customerEmail: email, idempotencyKey: key },
@@ -330,6 +530,8 @@ export class OrderService implements PaymentEventHandler {
             method,
             guestTokenHash: sha256(token),
             actor: 'GUEST',
+            promoCode: input.promoCode?.trim() || null,
+            billing: billingOf(input),
           },
           { key, hash },
         ),
@@ -412,7 +614,12 @@ export class OrderService implements PaymentEventHandler {
       const address = await this.resolveAddress(tx, p);
       const orderNumber = await generateOrderNumber(tx);
 
-      const lines: { product: CartProduct; quantity: number; amounts: LineAmounts }[] = [];
+      // A saved address can be a P.O. box too: Express can't go there.
+      if (p.method === 'EXPRESS' && isPoBox(address.addressLine1)) {
+        throw new ValidationError({ 'shippingAddress.addressLine1': "We can't ship Express to a P.O. box." });
+      }
+
+      const bought: { product: CartProduct; quantity: number }[] = [];
       for (const item of requested) {
         const product = await findProduct(tx, item.productId);
         if (!product || product.status !== 'ACTIVE') throw new ProductUnavailableError(item.productId);
@@ -423,13 +630,27 @@ export class OrderService implements PaymentEventHandler {
           actor: p.actor,
         });
         if (!taken) throw new OutOfStockError(product.name);
-        lines.push({ product, quantity: item.quantity, amounts: lineAmounts(product.price, item.quantity, product.taxRate, this.rules) });
+        bought.push({ product, quantity: item.quantity });
       }
-      const totals = orderTotals(
-        lines.map((l) => l.amounts),
+
+      // The code is checked again here (an invalid one is a 400 on promoCode),
+      // with the promotion row locked so a limited code can't be overused.
+      const subtotal = bought.reduce((acc, l) => acc.add(l.product.price.mul(l.quantity)), new Prisma.Decimal(0));
+      const promo = p.promoCode
+        ? await resolvePromotion(tx, p.promoCode, subtotal, { userId: p.userId, email: p.email }, { field: 'promoCode', lock: true })
+        : null;
+      const priced = priceLines(
+        bought.map((l) => ({ unitPrice: l.product.price, quantity: l.quantity, taxRate: l.product.taxRate })),
         p.method,
         this.rules,
+        { promo, destination: { state: address.state, postalCode: address.postalCode } },
       );
+      const lines: { product: CartProduct; quantity: number; amounts: LineAmounts }[] = bought.map((l, i) => ({
+        ...l,
+        amounts: priced.lines[i],
+      }));
+      const totals = priced.totals;
+      const savingsTotal = savings(lines.map((l) => ({ unitPrice: l.product.price, mrp: l.product.mrp, quantity: l.quantity })));
 
       // Manual → PENDING with a generated reference; Stripe → PENDING with a
       // PaymentIntent id and a client secret for the browser to confirm.
@@ -460,8 +681,15 @@ export class OrderService implements PaymentEventHandler {
           shipState: address.state,
           shipPostalCode: address.postalCode,
           shipCountry: address.country,
+          promoCode: promo?.code ?? null,
+          promotionId: promo?.id ?? null,
+          savingsTotal,
+          billSameAsShipping: p.billing.same,
+          billAddressLine1: p.billing.addressLine1,
+          billPostalCode: p.billing.postalCode,
           items: {
             create: lines.map(({ product, quantity, amounts }) => ({
+              mrp: product.mrp && product.mrp.gt(product.price) ? product.mrp : null,
               productId: product.id,
               merchantId: product.merchantId,
               productName: product.name,
@@ -509,12 +737,8 @@ export class OrderService implements PaymentEventHandler {
 
   // ── Reads ────────────────────────────────────────────────────────────────
 
-  async findMyOrders(userId: string, pageable: Pageable, filter?: OrderListFilter) {
-    const where = {
-      userId,
-      deleted: false,
-      ...(filter === 'open' ? { status: { notIn: DONE_STATUSES } } : filter === 'done' ? { status: { in: DONE_STATUSES } } : {}),
-    };
+  async findMyOrders(userId: string, pageable: Pageable, query: OrderListQuery = {}) {
+    const where = orderListWhere(userId, query);
     const [rows, total] = await Promise.all([
       this.prisma.order.findMany({
         where,
@@ -524,11 +748,57 @@ export class OrderService implements PaymentEventHandler {
       }),
       this.prisma.order.count({ where }),
     ]);
+    const refs = await productRefs(this.prisma, rows.flatMap((o) => o.items.map((i) => i.productId)));
     return toPage(
-      rows.map((o) => toOrderSummaryResponse(o, this.view)),
+      rows.map((o) => toOrderSummaryResponse(o, this.view, refs)),
       total,
       pageable,
     );
+  }
+
+  /** Tab counts for the account order list, under the same search and period. */
+  async countMyOrders(userId: string, query: Omit<OrderListQuery, 'status'> = {}) {
+    const count = (status?: OrderListFilter) => this.prisma.order.count({ where: orderListWhere(userId, { ...query, status }) });
+    const [all, open, delivered, returned, cancelled] = await Promise.all([
+      count(),
+      count('open'),
+      count('delivered'),
+      count('returned'),
+      count('cancelled'),
+    ]);
+    return { all, open, delivered, returned, cancelled };
+  }
+
+  /** "Email invoice": the order's invoice, sent to the order's email (a logged notification). */
+  async emailInvoice(user: { id: string; email: string }, idOrNumber: string) {
+    const order = await findOwned(this.prisma, user.id, idOrNumber);
+    const c = order.currency;
+    const lines = order.items.map(
+      (i) => `${i.quantity} × ${i.productName}${i.variantName ? ` (${i.variantName})` : ''} — ${i.lineTotal.toFixed(2)} ${c}`,
+    );
+    await this.mailer.send({
+      template: 'ORDER_INVOICE',
+      to: order.customerEmail ?? user.email,
+      subject: `Invoice for order ${order.orderNumber}`,
+      body: [
+        `Invoice for order ${order.orderNumber} (placed ${order.createdAt.toISOString().slice(0, 10)})`,
+        '',
+        ...lines,
+        '',
+        `Subtotal: ${order.subtotal.toFixed(2)} ${c}`,
+        ...(order.discountTotal.gt(0) ? [`Discount: -${order.discountTotal.toFixed(2)} ${c}`] : []),
+        `Shipping: ${order.shippingTotal.toFixed(2)} ${c}`,
+        `Tax: ${order.taxTotal.toFixed(2)} ${c}`,
+        `Total: ${order.grandTotal.toFixed(2)} ${c}`,
+        ...(order.refundedTotal.gt(0) ? [`Refunded: ${order.refundedTotal.toFixed(2)} ${c}`] : []),
+        '',
+        `Ship to: ${order.shipRecipientName}, ${order.shipAddressLine1}, ${order.shipCity}, ${order.shipState} ${order.shipPostalCode}`,
+        '',
+        this.mail.storeName,
+      ].join('\n'),
+      orderId: order.id,
+      userId: user.id,
+    });
   }
 
   /** By id or order number (EC-1234567, typed any way). */
@@ -559,9 +829,11 @@ export class OrderService implements PaymentEventHandler {
     });
     if (!order) throw new TrackedOrderNotFoundError();
     const given = input.emailOrZip.trim();
+    // A ZIP matches the shipping ZIP or, when billing differed, the billing ZIP.
+    const zips = [order.shipPostalCode, order.billPostalCode].filter((z): z is string => !!z).map(postalCode5);
     const matches = given.includes('@')
       ? [order.customerEmail, order.user?.email].some((e) => !!e && e.toLowerCase() === given.toLowerCase())
-      : /^\d{5}(-?\d{4})?$/.test(given) && postalCode5(order.shipPostalCode) === given.slice(0, 5);
+      : /^\d{5}(-?\d{4})?$/.test(given) && zips.includes(given.slice(0, 5));
     if (!matches) throw new TrackedOrderNotFoundError();
     return toTrackedOrder(order, this.view);
   }
@@ -575,6 +847,7 @@ export class OrderService implements PaymentEventHandler {
    * claim the same units.
    */
   async requestReturn(userId: string, idOrNumber: string, input: z.output<typeof ReturnRequestSchema>) {
+    const pickup = input.method === 'PICKUP' ? pickupDay(input.pickupDate) : null;
     const created = await this.prisma.$transaction(async (tx) => {
       const { id } = await findOwned(tx, userId, idOrNumber);
       await lockOrderRow(tx, id);
@@ -620,6 +893,11 @@ export class OrderService implements PaymentEventHandler {
           reason: input.reason,
           method: input.method ?? null,
           requestedBy: 'CUSTOMER',
+          refundTo: input.refundTo ?? 'ORIGINAL',
+          dropoffCode: dropoffCode(rmaNumber),
+          dropoffBy: new Date(Date.now() + DROPOFF_DAYS * DAY_MS),
+          pickupDate: pickup,
+          pickupWindow: pickup ? PICKUP_WINDOW : null,
           items: { create: input.items.map((i) => ({ orderItemId: i.orderItemId, quantity: i.quantity })) },
         },
         include: { items: true },
@@ -629,7 +907,7 @@ export class OrderService implements PaymentEventHandler {
     }, TX.default);
 
     await this.mailer.send(returnRequestedMail(created.order, this.mail, created.ret.rmaNumber));
-    return toReturnResponse(created.ret, created.order.items, this.view);
+    return toReturnResponse(created.ret, created.order.items, this.view, created.order);
   }
 
   // ── Cancellation and manual payment ──────────────────────────────────────
@@ -723,6 +1001,7 @@ export class OrderService implements PaymentEventHandler {
 
   /** Paid-side effects, once per order (the claim's winner): email and the PURCHASE event. */
   private async afterPaid(orderId: string) {
+    await this.snapshotPaymentMethod(orderId);
     const order = await this.loadDetail(this.prisma, orderId);
     await this.mailer.send(paymentReceivedMail(order, this.mail));
     await this.analytics.recordPurchase(
@@ -842,15 +1121,43 @@ export class OrderService implements PaymentEventHandler {
 
   /** The full `Order`, with each line's parent product for PDP links. */
   async present(order: OrderDetail, options: { customerView?: boolean } = {}) {
-    const products = await this.prisma.product.findMany({
-      where: { id: { in: order.items.map((i) => i.productId) } },
-      select: { id: true, parentId: true },
-    });
+    const refs = await productRefs(this.prisma, order.items.map((i) => i.productId));
     return toOrderResponse(order, this.view, {
       customerView: options.customerView ?? true,
-      parentIds: new Map(products.map((p) => [p.id, p.parentId])),
+      parentIds: new Map([...refs].map(([id, r]) => [id, r.parentId])),
+      slugs: new Map([...refs].map(([id, r]) => [id, r.slug])),
     });
   }
+
+  /**
+   * "Visa •••• 4242" on the order (contract B3): what the gateway reports for
+   * the paid intent (MANUAL for the manual gateway). Best effort — a lookup
+   * failure never undoes the payment.
+   */
+  private async snapshotPaymentMethod(orderId: string) {
+    const order = await this.prisma.order.findUnique({ where: { id: orderId }, select: { paymentIntentId: true } });
+    if (!order?.paymentIntentId || !this.gateway.describePayment) return;
+    try {
+      const method = await this.gateway.describePayment(order.paymentIntentId);
+      if (!method) return;
+      await this.prisma.order.update({
+        where: { id: orderId },
+        data: { paymentMethodType: method.type, cardBrand: method.brand, cardLast4: method.last4 },
+      });
+    } catch (e) {
+      log.warn(`Could not read the payment method for order ${orderId}`, e);
+    }
+  }
+}
+
+/** Parent id and PDP slug (url slug, else the SKU id) of the products order lines point at. */
+export async function productRefs(db: Db, productIds: string[]): Promise<Map<string, { parentId: string; slug: string }>> {
+  if (!productIds.length) return new Map();
+  const rows = await db.product.findMany({
+    where: { id: { in: [...new Set(productIds)] } },
+    select: { id: true, parentId: true, urlSlug: true },
+  });
+  return new Map(rows.map((p) => [p.id, { parentId: p.parentId, slug: p.urlSlug ?? p.id }]));
 }
 
 function findProduct(db: Db, productId: string) {
@@ -886,7 +1193,7 @@ function normalizeAddress(a: ShippingAddressInput): AddressSnapshot {
     addressLine1: a.addressLine1.trim(),
     addressLine2: a.addressLine2?.trim() || null,
     city: a.city.trim(),
-    state: a.state.trim(),
+    state: normalizeState(a.state, a.country),
     postalCode: a.postalCode.trim(),
     country: a.country?.trim() || 'US',
   };

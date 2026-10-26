@@ -11,7 +11,7 @@ describe('support messages', () => {
     const email = `help-${randomUUID()}@test.local`;
     const res = await request(app)
       .post('/api/support/messages')
-      .send({ name: 'Pat', email, topic: 'Order', orderNumber: 'ec4821907', message: 'Where is my parcel, please?' });
+      .send({ name: 'Pat', email, topic: 'Where is my order?', orderNumber: 'ec4821907', message: 'Where is my parcel, please?' });
     expect(res.status).toBe(201);
     expect(res.body.data.ticketNumber).toMatch(/^T-\d{6}$/);
     const row = await prisma.supportMessage.findUniqueOrThrow({ where: { ticketNumber: res.body.data.ticketNumber } });
