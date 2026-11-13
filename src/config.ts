@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 /**
@@ -155,6 +156,13 @@ const EnvSchema = z.object({
   // Host that image checks use for localhost URLs (Docker: host.docker.internal).
   IMAGE_CHECK_LOCALHOST_ALIAS: z.string().default(''),
   PASSWORD_RESET_TTL_MINUTES: int(60),
+
+  // ── Vendor API integrations (Admin › Settings › API integrations) ──
+  // Seals the vendor secrets stored in the database. Any string; when unset a
+  // key is derived from JWT_SECRET, so changing JWT_SECRET then means
+  // re-entering the secrets. Set it once and keep it.
+  INTEGRATIONS_ENCRYPTION_KEY: z.string().default(''),
+  VENDOR_API_TIMEOUT_MS: int(20_000),
 });
 
 /** A shipping method's price and delivery promise. */
@@ -209,6 +217,12 @@ export interface Config {
   mail: import('./notify/mailer').MailConfig;
   imageChecks: { enabled: boolean; timeoutMs: number; localhostAlias: string };
   passwordReset: { ttlMinutes: number };
+  integrations: {
+    /** 32-byte AES key for vendor secrets. */
+    encryptionKey: Buffer;
+    /** Per request to a vendor API. */
+    timeoutMs: number;
+  };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -301,5 +315,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       localhostAlias: e.IMAGE_CHECK_LOCALHOST_ALIAS.trim(),
     },
     passwordReset: { ttlMinutes: e.PASSWORD_RESET_TTL_MINUTES },
+    integrations: {
+      encryptionKey: createHash('sha256')
+        .update(e.INTEGRATIONS_ENCRYPTION_KEY || `integrations:${e.JWT_SECRET}`)
+        .digest(),
+      timeoutMs: e.VENDOR_API_TIMEOUT_MS,
+    },
   };
 }
