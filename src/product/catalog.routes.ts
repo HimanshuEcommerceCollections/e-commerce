@@ -7,6 +7,7 @@ import { ValidationError } from '../common/validation';
 import type { Container } from '../container';
 import { CATALOG_ROLES } from '../routes';
 import { templateCsv } from './importer/template';
+import { auditActor } from '../audit/audit.service';
 
 /**
  * Catalog files (FR-IM-01..12, NFR-06): import (catalog staff; sellers submit
@@ -41,6 +42,23 @@ export function catalogRoutes(c: Container): Router {
     const file = fileOf(req);
     const user = currentUser(req);
     const report = await c.catalogImport.importFile(file, user.id, { staff: isStaff(user.role), actor: user.email });
+    await c.audit.record({
+      action: 'catalog.imported',
+      category: 'import',
+      actor: auditActor(user),
+      source: 'Catalog import',
+      entity: { type: 'import', code: report.fileName, label: `Import ${report.fileName}` },
+      summary: `Imported ${report.importedRows} of ${report.totalRows} rows: ${report.createdRows} created, ${report.updatedRows} updated, ${report.failedRows} failed`,
+      before: '—',
+      after: `${report.parentProductsCreated} product(s) created, ${report.parentProductsUpdated} updated`,
+      details: {
+        totalRows: report.totalRows,
+        importedRows: report.importedRows,
+        failedRows: report.failedRows,
+        skus: report.imported.slice(0, 500).map((i) => i.sku),
+        errors: report.errors.slice(0, 50),
+      },
+    });
     res.json(ok(report, `Imported ${report.importedRows} of ${report.totalRows} rows`));
   });
 
@@ -50,6 +68,17 @@ export function catalogRoutes(c: Container): Router {
 
   r.post('/updates', ...staffOnly, multipart, upload.single('file'), async (req, res) => {
     const report = await c.catalogUpdates.updateFile(fileOf(req), currentUser(req).email);
+    await c.audit.record({
+      action: 'catalog.bulk_updated',
+      category: 'import',
+      actor: auditActor(currentUser(req)),
+      source: 'Bulk update',
+      entity: { type: 'import', code: report.fileName, label: `Bulk update ${report.fileName}` },
+      summary: `Bulk ${report.columns.join(', ') || 'update'}: ${report.updatedRows} of ${report.totalRows} rows updated, ${report.failedRows} failed`,
+      before: '—',
+      after: `${report.updatedRows} SKU(s) updated`,
+      details: { columns: report.columns, totalRows: report.totalRows, updatedRows: report.updatedRows, errors: report.errors.slice(0, 50) },
+    });
     res.json(ok(report, `Updated ${report.updatedRows} of ${report.totalRows} rows`));
   });
 

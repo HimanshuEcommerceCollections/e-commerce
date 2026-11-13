@@ -920,3 +920,51 @@ model VendorOrder {
   @@index([vendor, createdAt], map: "idx_vendor_orders_vendor_created")
   @@map("vendor_orders")
 }
+
+/// Catalog audit log (7_audit_log): who changed what, when, from where and the
+/// previous value. Append-only: a trigger rejects UPDATE and DELETE. No FKs, so
+/// records outlive the users and products they mention.
+model AuditEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  /// Display number, shown as EV-<seq>.
+  seq         BigInt   @unique(map: "uk_audit_events_seq") @default(autoincrement())
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  /// Dotted event type, e.g. product.status_changed, stock.changed, submission.approved.
+  action      String   @db.VarChar(60)
+  /// Filter group: stock | price | submit | edit | decision | assign | status | product | import | delist | unpub | supplier | doc | integration
+  category    String   @db.VarChar(20)
+  actorId     String?  @map("actor_id") @db.Uuid
+  actorEmail  String?  @map("actor_email") @db.VarChar(255)
+  actorName   String?  @map("actor_name") @db.VarChar(200)
+  actorRole   String?  @map("actor_role") @db.VarChar(20)
+  /// team | seller | system
+  actorType   String   @map("actor_type") @db.VarChar(10)
+  /// Where the change came from, e.g. "Review queue", "Bulk upload", "Admin catalog".
+  source      String   @db.VarChar(100)
+  /// product | variant | submission | supplier | document | integration | import
+  entityType  String   @map("entity_type") @db.VarChar(30)
+  entityId    String?  @map("entity_id") @db.VarChar(100)
+  /// SKU, product code, submission reference…
+  entityCode  String?  @map("entity_code") @db.VarChar(255)
+  entityLabel String?  @map("entity_label") @db.VarChar(255)
+  /// The seller whose item it is, for the seller filter.
+  sellerId    String?  @map("seller_id") @db.Uuid
+  sellerName  String?  @map("seller_name") @db.VarChar(200)
+  summary     String   @db.VarChar(500)
+  beforeValue String?  @map("before_value") @db.VarChar(500)
+  afterValue  String?  @map("after_value") @db.VarChar(500)
+  note        String?  @db.VarChar(2000)
+  /// Set when the change needs the catalog team's eye (stock to zero, a big drop).
+  alert       String?  @db.VarChar(255)
+  /// Structured before/after and anything else worth keeping.
+  details     Json     @default("{}")
+
+  @@index([createdAt(sort: Desc)], map: "idx_audit_events_created")
+  @@index([entityType, entityId, createdAt], map: "idx_audit_events_entity")
+  @@index([entityCode, createdAt], map: "idx_audit_events_entity_code")
+  @@index([actorId, createdAt], map: "idx_audit_events_actor")
+  @@index([action, createdAt], map: "idx_audit_events_action")
+  @@index([category, createdAt], map: "idx_audit_events_category")
+  @@index([sellerId, createdAt], map: "idx_audit_events_seller")
+  @@map("audit_events")
+}

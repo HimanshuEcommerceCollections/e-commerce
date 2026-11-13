@@ -42,6 +42,8 @@ import { ImageCheckService } from './product/image-check';
 import { pricingRules } from './order/pricing';
 import { ProductService } from './product/product.service';
 import { SellerSubmissionService } from './seller/submission.service';
+import { ReviewQueueService } from './seller/review-queue.service';
+import { AuditService } from './audit/audit.service';
 import { ManualShippingProvider } from './shipping/manual-provider';
 import type { ShippingProvider } from './shipping/shipping-provider';
 import { SupportService } from './support/support.service';
@@ -82,6 +84,10 @@ export interface Container {
   catalogAdmin: CatalogAdminService;
   /** Seller portal: submissions, review decisions and seller stock. */
   submissions: SellerSubmissionService;
+  /** Review queue tabs, automatic checks, structured decisions and bulk approval. */
+  reviewQueue: ReviewQueueService;
+  /** Catalog audit log: append-only; `record` never throws. */
+  audit: AuditService;
   cart: CartService;
   orders: OrderService;
   /** Account home tiles (contract C1). */
@@ -166,6 +172,8 @@ export function createContainer(
   const customerReturns = new CustomerReturnService(prisma, config);
   const catalogAdmin = new CatalogAdminService(prisma, catalogImport, imageChecks, config.inventory.lowStockThreshold);
   const integrations = new IntegrationService(prisma, new SecretBox(config.integrations.encryptionKey), config.integrations.timeoutMs);
+  const audit = new AuditService(prisma);
+  const submissions = new SellerSubmissionService(prisma, catalogReader, catalogImport, catalogExport, imageChecks, mailer, config, audit);
 
   return {
     config,
@@ -186,7 +194,9 @@ export function createContainer(
     catalogExport,
     imageChecks,
     catalogAdmin,
-    submissions: new SellerSubmissionService(prisma, catalogReader, catalogImport, catalogExport, imageChecks, mailer, config),
+    submissions,
+    reviewQueue: new ReviewQueueService(prisma, catalogExport, submissions, audit, config.reviewChecks),
+    audit,
     cart,
     orders,
     accountSummary: new AccountSummaryService(prisma, orders, customerReturns, savedItems),

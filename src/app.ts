@@ -6,6 +6,8 @@ import { errorHandler, notFoundHandler } from './common/error-handler';
 import type { Container } from './container';
 import { adminCatalogRoutes } from './admin/catalog.routes';
 import { adminSubmissionRoutes, sellerRoutes } from './seller/seller.routes';
+import { adminReviewQueueRoutes } from './seller/review-queue.routes';
+import { adminAuditRoutes } from './audit/audit.routes';
 import { adminOpsRoutes } from './admin/ops.routes';
 import { adminInboxRoutes } from './admin/inbox.routes';
 import { adminPromotionRoutes } from './admin/promotions.routes';
@@ -93,6 +95,8 @@ export function createApp(c: Container): Express {
   app.use('/api/admin', adminGiftCardRoutes(c));
   app.use('/api/admin', adminCatalogRoutes(c));
   app.use('/api/admin', adminSubmissionRoutes(c));
+  app.use('/api/admin', adminReviewQueueRoutes(c));
+  app.use('/api/admin', adminAuditRoutes(c));
   app.use('/api/admin', integrationRoutes(c));
   app.use('/api/admin', gootenRoutes(c));
   app.use('/api/seller', sellerRoutes(c));

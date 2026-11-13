@@ -6,6 +6,17 @@ import { parsePageable } from '../common/pagination';
 import { ValidationError, parseBody, pathUuid } from '../common/validation';
 import type { Container } from '../container';
 import { CATALOG_ROLES } from '../routes';
+import { auditActor } from '../audit/audit.service';
+import {
+  parentSnapshots,
+  productCreatedEvent,
+  productDeletedEvent,
+  productUpdatedEvents,
+  statusEvent,
+  stockEvent,
+  variantSnapshot,
+  variantUpdatedEvents,
+} from '../audit/catalog-audit';
 import {
   ADMIN_INVENTORY_SORTS,
   ADMIN_PRODUCT_SORTS,
@@ -60,7 +71,14 @@ export function adminCatalogRoutes(c: Container): Router {
   });
   r.post('/products', ...staff, async (req, res) => {
     const input = parseBody(ProductCreateSchema, req.body);
-    res.status(201).json(created(await svc.createProduct(input, actor(req)), 'Product created'));
+    const product = await svc.createProduct(input, actor(req));
+    const [made] = (await parentSnapshots(c.prisma, [product.id])).values();
+    if (made) {
+      await c.audit.record(
+        productCreatedEvent(auditActor(currentUser(req)), { ...made, variants: product.variants.map((v) => ({ sku: v.sku, status: v.status })) }),
+      );
+    }
+    res.status(201).json(created(product, 'Product created'));
   });
   r.get('/products/status-counts', ...staff, async (req, res) => {
     const filter = {
@@ -71,11 +89,23 @@ export function adminCatalogRoutes(c: Container): Router {
     res.json(ok(await svc.productStatusCounts(filter)));
   });
   r.post('/products/status', ...staff, async (req, res) => {
-    const result = await svc.setStatus(parseBody(BulkStatusSchema, req.body));
+    const input = parseBody(BulkStatusSchema, req.body);
+    const before = await parentSnapshots(c.prisma, input.parentIds);
+    const result = await svc.setStatus(input);
+    const who = auditActor(currentUser(req));
+    await c.audit.record(
+      [...before.values()]
+        .filter((p) => p.statuses.length && !(p.statuses.length === 1 && p.statuses[0] === input.status))
+        .map((p) => ({ ...statusEvent(who, p, input.status!), details: { bulk: input.parentIds.length > 1 } })),
+    );
     res.json(ok(result, `${result.products} product(s) set to ${result.status}`));
   });
   r.post('/products/delete', ...staff, async (req, res) => {
-    const result = await svc.deleteProducts(parseBody(BulkDeleteSchema, req.body));
+    const input = parseBody(BulkDeleteSchema, req.body);
+    const before = await parentSnapshots(c.prisma, input.parentIds);
+    const result = await svc.deleteProducts(input);
+    const who = auditActor(currentUser(req));
+    await c.audit.record([...before.values()].map((p) => ({ ...productDeletedEvent(who, p), details: { bulk: input.parentIds.length > 1 } })));
     res.json(ok(result, `${result.products} product(s) deleted`));
   });
   r.get('/products/:id', ...staff, async (req, res) => {
@@ -84,18 +114,34 @@ export function adminCatalogRoutes(c: Container): Router {
   r.patch('/products/:id', ...staff, async (req, res) => {
     const id = pathUuid(req.params.id);
     const input = parseBody(ParentUpdateSchema, req.body);
-    res.json(ok(await svc.updateProduct(id, input), 'Product updated'));
+    const before = (await parentSnapshots(c.prisma, [id])).get(id);
+    const product = await svc.updateProduct(id, input);
+    const after = (await parentSnapshots(c.prisma, [id])).get(id);
+    if (before && after) await c.audit.record(productUpdatedEvents(auditActor(currentUser(req)), before, after));
+    res.json(ok(product, 'Product updated'));
   });
 
   r.patch('/variants/:id', ...staff, async (req, res) => {
     const id = pathUuid(req.params.id);
     const input = parseBody(VariantUpdateSchema, req.body);
-    res.json(ok(await svc.updateVariant(id, input, actor(req)), 'Variant updated'));
+    const before = await variantSnapshot(c.prisma, id);
+    const variant = await svc.updateVariant(id, input, actor(req));
+    const after = await variantSnapshot(c.prisma, id);
+    if (before && after) await c.audit.record(variantUpdatedEvents(auditActor(currentUser(req)), before, after));
+    res.json(ok(variant, 'Variant updated'));
   });
   r.post('/variants/:id/stock-adjustments', ...staff, async (req, res) => {
     const id = pathUuid(req.params.id);
     const input = parseBody(StockAdjustmentSchema, req.body);
-    res.json(ok(await svc.adjustStock(id, input, actor(req)), 'Stock adjusted'));
+    const row = await svc.adjustStock(id, input, actor(req));
+    const v = await variantSnapshot(c.prisma, id);
+    if (v) {
+      await c.audit.record(
+        // The level the adjustment wrote (a later checkout may already have moved it).
+        stockEvent(auditActor(currentUser(req)), v, row.stockQuantity - input.delta, row.stockQuantity, 'Admin catalog', input.reason?.trim() || null, 'stock.adjusted'),
+      );
+    }
+    res.json(ok(row, 'Stock adjusted'));
   });
   r.get('/variants/:id/stock-movements', ...staff, async (req, res) => {
     const pageable = parsePageable(req, { sort: 'createdAt,desc', allowedSorts: STOCK_MOVEMENT_SORTS });

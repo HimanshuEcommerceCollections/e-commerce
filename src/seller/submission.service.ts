@@ -31,8 +31,21 @@ import {
 import type { CatalogExportService } from '../product/importer/export.service';
 import type { CatalogFileReader, UploadedFile } from '../product/importer/file-reader';
 import type { CatalogImportService, ImportWarning, ImportedRow, RowError } from '../product/importer/import.service';
+import type { AuditInput, AuditService } from '../audit/audit.service';
+import { stockEvent } from '../audit/catalog-audit';
 
 const log = logger('seller-portal');
+
+const KIND_TEXT: Record<string, string> = { NEW_PRODUCT: 'new product', EDIT: 'edit', DELIST: 'delisting' };
+const STATUS_TEXT: Record<string, string> = {
+  SUBMITTED: 'Waiting',
+  IN_REVIEW: 'In review',
+  CHANGES_REQUESTED: 'Changes requested',
+  APPROVED: 'Approved',
+  REJECTED: 'Rejected',
+  WITHDRAWN: 'Withdrawn',
+};
+const PRICE_COLUMNS = new Set([COLUMNS.SELLING_PRICE.header, COLUMNS.MRP.header]);
 
 /** Time an upload waits for its image URL checks. */
 const IMAGE_CHECK_BUDGET_MS = 30_000;
@@ -167,6 +180,8 @@ export class SellerSubmissionService {
     private readonly images: ImageCheckService,
     private readonly mailer: Mailer,
     config: Config,
+    /** Catalog audit log; optional so the service also runs without one. */
+    private readonly audit?: AuditService,
   ) {
     this.storeName = config.store.name;
   }
@@ -412,6 +427,7 @@ export class SellerSubmissionService {
           return s;
         }),
     );
+    await this.auditSubmitted(row, seller, meta, false);
     return this.summary(row);
   }
 
@@ -440,6 +456,7 @@ export class SellerSubmissionService {
       });
       return tx.productSubmission.findUniqueOrThrow({ where: { id }, include: SUBMISSION_INCLUDE });
     });
+    await this.auditSubmitted(row, seller, meta, true);
     return this.summary(row);
   }
 
@@ -467,6 +484,7 @@ export class SellerSubmissionService {
     const row = await this.transition(s.id, ['SUBMITTED', 'CHANGES_REQUESTED'], 'WITHDRAWN', seller, null, {
       decidedAt: new Date(),
     });
+    await this.auditDecision(row, { ...seller, type: 'seller' }, 'submission.withdrawn', 'submit', s.status, 'Portal', null);
     return this.summary(row);
   }
 
@@ -489,7 +507,10 @@ export class SellerSubmissionService {
       seen.add(i.sku);
       return true;
     });
+    let audited: AuditInput[] = [];
+    const source = reason === 'Seller stock update' ? 'Portal' : reason.startsWith('Seller upload') ? 'Bulk upload' : reason;
     const updated = await this.prisma.$transaction(async (tx) => {
+      audited = [];
       const skus = unique.map((i) => i.sku);
       await tx.$queryRaw`SELECT id FROM products WHERE sku = ANY(${skus}::text[]) AND merchant_id = ${seller.id}::uuid AND deleted = false FOR UPDATE`;
       const current = new Map(
@@ -515,9 +536,13 @@ export class SellerSubmissionService {
           },
         });
         changes.push({ sku: item.sku, from: product.stockQuantity, to: item.quantity });
+        audited.push(
+          stockEvent({ ...seller, type: 'seller' }, product, product.stockQuantity, item.quantity, source, reason === source ? null : reason),
+        );
       }
       return changes;
     }, TX.default);
+    await this.audit?.record(audited);
     for (const c of updated.filter((c) => c.to === 0 && c.from > 0)) {
       log.warn(`Stock alert: ${seller.email} set ${c.sku} from ${c.from} to 0`);
     }
@@ -592,7 +617,8 @@ export class SellerSubmissionService {
   async claim(reference: string, reviewer: Actor) {
     const s = await this.find(reference);
     if (s.status === 'IN_REVIEW' && s.reviewerId === reviewer.id) return this.detail(s);
-    await this.transition(s.id, ['SUBMITTED'], 'IN_REVIEW', reviewer, null, { reviewerId: reviewer.id, reviewStartedAt: new Date() });
+    const row = await this.transition(s.id, ['SUBMITTED'], 'IN_REVIEW', reviewer, null, { reviewerId: reviewer.id, reviewStartedAt: new Date() });
+    await this.auditDecision(row, reviewer, 'submission.claimed', 'assign', s.status, 'Review queue', null);
     return this.get(reference);
   }
 
@@ -602,14 +628,17 @@ export class SellerSubmissionService {
    * untouched. DELIST: every variant is archived. A failed import leaves the
    * submission in review with the reasons.
    */
-  async approve(reference: string, reviewer: Actor, note?: string) {
+  async approve(reference: string, reviewer: Actor, note?: string, extra?: Record<string, unknown>) {
     let s = await this.find(reference);
+    const was = s.status;
     if (s.status === 'SUBMITTED') {
       await this.transition(s.id, ['SUBMITTED'], 'IN_REVIEW', reviewer, null, { reviewerId: reviewer.id, reviewStartedAt: new Date() });
       s = await this.find(reference);
     }
     if (s.status !== 'IN_REVIEW') throw new InvalidSubmissionStateError(`Submission ${reference} is ${s.status}; only submissions waiting for review can be approved`);
 
+    // Live prices before the change goes in, for the audit log.
+    const priceChanges = s.kind === 'EDIT' && this.audit ? await this.priceChanges(s).catch(() => []) : [];
     if (s.kind === 'EDIT') {
       const rows = (s.payload as unknown as EditPayload).rows.map((r, i) => new ImportRow(i + 1, new Map(Object.entries(r))));
       const headers = [...new Set(rows.flatMap((r) => Object.keys(r.toRecord())))];
@@ -647,21 +676,38 @@ export class SellerSubmissionService {
       return decided;
     }, TX.default);
     await this.notify(row, `approved${s.kind === 'DELIST' ? ': the product is no longer on sale' : ' and live'}`, note);
+    await this.auditDecision(row, reviewer, 'submission.approved', 'decision', was, 'Review queue', note ?? null, extra);
+    await this.audit?.record(
+      priceChanges.map((c) => ({
+        action: 'price.changed',
+        category: 'price' as const,
+        actor: reviewer,
+        source: 'Review queue',
+        entity: { type: 'variant', code: c.sku, label: row.parentProduct.name },
+        seller: { id: row.merchantId, name: row.merchant.fullName },
+        summary: `${c.column.replace('_', ' ')} ${money(c.before)} → ${money(c.after)}${pctText(c.before, c.after)} approved`,
+        before: money(c.before),
+        after: money(c.after),
+        note: `Submission ${row.reference}`,
+        details: { submission: row.reference, column: c.column, before: c.before, after: c.after },
+      })),
+    );
     return this.get(reference);
   }
 
-  async requestChanges(reference: string, reviewer: Actor, note: string) {
+  async requestChanges(reference: string, reviewer: Actor, note: string, extra?: Record<string, unknown>) {
     const s = await this.find(reference);
     const row = await this.transition(s.id, ['SUBMITTED', 'IN_REVIEW'], 'CHANGES_REQUESTED', reviewer, note, {
       reviewerId: reviewer.id,
       reviewNote: note,
     });
     await this.notify(row, 'returned with changes requested', note);
+    await this.auditDecision(row, reviewer, 'submission.changes_requested', 'decision', s.status, 'Review queue', note, extra);
     return this.get(reference);
   }
 
   /** Closes it with a reason. A new product's drafts are archived; a live product is untouched. */
-  async reject(reference: string, reviewer: Actor, reason: string) {
+  async reject(reference: string, reviewer: Actor, reason: string, extra?: Record<string, unknown>) {
     const s = await this.find(reference);
     const row = await this.prisma.$transaction(async (tx) => {
       const decided = await this.transitionIn(tx, s.id, ['SUBMITTED', 'IN_REVIEW'], 'REJECTED', reviewer, reason, {
@@ -679,6 +725,7 @@ export class SellerSubmissionService {
       return decided;
     }, TX.default);
     await this.notify(row, 'rejected', reason);
+    await this.auditDecision(row, reviewer, 'submission.rejected', 'decision', s.status, 'Review queue', reason, extra);
     return this.get(reference);
   }
 
@@ -877,7 +924,138 @@ export class SellerSubmissionService {
         (note ? `\n\nNote from the catalog team:\n${note}` : ''),
     });
   }
+
+  // ── Audit log (written after each change commits; never fails the request) ──
+
+  /** Price and MRP changes an EDIT submission makes against the live SKUs. */
+  private async priceChanges(s: SubmissionRow): Promise<Array<{ sku: string; column: string; before: string; after: string }>> {
+    if (s.kind !== 'EDIT') return [];
+    const out: Array<{ sku: string; column: string; before: string; after: string }> = [];
+    for (const c of await this.changes(s)) {
+      if (c.action !== 'UPDATE') continue;
+      for (const f of c.fields) if (PRICE_COLUMNS.has(f.column)) out.push({ sku: c.sku, column: f.column, before: f.before, after: f.after });
+    }
+    return out;
+  }
+
+  private async auditSubmitted(
+    row: SubmissionRow,
+    seller: Actor,
+    meta: { source: 'UPLOAD' | 'FORM'; fileName: string | null; note?: string },
+    resubmitted: boolean,
+  ) {
+    if (!this.audit) return;
+    try {
+      const actor = { ...seller, type: 'seller' as const };
+      const source = meta.source === 'UPLOAD' ? `Bulk upload${meta.fileName ? ` · ${meta.fileName}` : ''}` : 'Portal';
+      const entity = { type: 'submission', id: row.reference, code: row.parentProduct.code, label: row.parentProduct.name };
+      const sellerRef = { id: row.merchantId, name: row.merchant.fullName };
+      const summary = this.summary(row);
+      const events: AuditInput[] = [];
+      if (row.kind === 'DELIST') {
+        events.push({
+          action: 'product.delist_requested',
+          category: 'delist',
+          actor,
+          source,
+          entity,
+          seller: sellerRef,
+          summary: `Asked to take ${row.parentProduct.name} off sale (${row.reference})`,
+          before: 'Live',
+          after: 'Delisting requested',
+          note: meta.note ? `Reason: ${meta.note}` : null,
+          details: { submission: row.reference },
+        });
+      } else if (row.kind === 'NEW_PRODUCT') {
+        events.push({
+          action: resubmitted ? 'product.resubmitted' : 'product.submitted',
+          category: 'submit',
+          actor,
+          source,
+          entity,
+          seller: sellerRef,
+          summary: `${resubmitted ? 'Resubmitted' : 'Submitted'} ${row.parentProduct.name} for review (${summary.skus.length} SKU(s), ${row.reference})`,
+          before: resubmitted ? 'Changes requested' : '—',
+          after: resubmitted ? 'Resubmitted' : 'Submitted',
+          note: meta.note ?? null,
+          details: { submission: row.reference, skus: summary.skus },
+        });
+      } else {
+        const changes = await this.changes(row);
+        const fields = [...new Set(changes.flatMap((c) => c.fields.map((f) => f.column)))];
+        const show = (c: (typeof changes)[number]) => c.fields.slice(0, 3);
+        events.push({
+          action: 'product.edit_submitted',
+          category: 'edit',
+          actor,
+          source,
+          entity,
+          seller: sellerRef,
+          summary: `Edit to ${row.parentProduct.name} sent for review: ${fields.slice(0, 6).map((f) => f.replaceAll('_', ' ')).join(', ') || 'no field changes'} (${row.reference})`,
+          before: changes.flatMap((c) => show(c).map((f) => `${f.column.replaceAll('_', ' ')}: ${f.before || '—'}`)).slice(0, 4).join(' · ') || '—',
+          after: changes.flatMap((c) => show(c).map((f) => `${f.column.replaceAll('_', ' ')}: ${f.after || '—'}`)).slice(0, 4).join(' · ') || '—',
+          note: meta.note ?? null,
+          details: { submission: row.reference, changes },
+        });
+        for (const c of changes) {
+          for (const f of c.fields.filter((f) => f.column === COLUMNS.SELLING_PRICE.header && c.action === 'UPDATE')) {
+            events.push({
+              action: 'price.change_requested',
+              category: 'price',
+              actor,
+              source,
+              entity: { type: 'variant', code: c.sku, label: row.parentProduct.name },
+              seller: sellerRef,
+              summary: `Price ${money(f.before)} → ${money(f.after)}${pctText(f.before, f.after)} pending review`,
+              before: money(f.before),
+              after: `${money(f.after)} (pending)`,
+              note: `Submission ${row.reference}${meta.note ? ` · ${meta.note}` : ''}`,
+              details: { submission: row.reference, before: f.before, after: f.after },
+            });
+          }
+        }
+      }
+      await this.audit.record(events);
+    } catch (e) {
+      log.error(`Audit of submission ${row.reference} failed: ${(e as Error).message}`);
+    }
+  }
+
+  private async auditDecision(
+    row: SubmissionRow,
+    actor: Actor & { type?: 'seller' | 'team' },
+    action: string,
+    category: 'decision' | 'assign' | 'submit',
+    from: string,
+    source: string,
+    note: string | null,
+    extra?: Record<string, unknown>,
+  ) {
+    const to = STATUS_TEXT[row.status] ?? row.status;
+    await this.audit?.record({
+      action,
+      category,
+      actor,
+      source,
+      entity: { type: 'submission', id: row.reference, code: row.parentProduct.code, label: row.parentProduct.name },
+      seller: { id: row.merchantId, name: row.merchant.fullName },
+      summary: `${row.reference} (${KIND_TEXT[row.kind] ?? row.kind}): ${STATUS_TEXT[from] ?? from} → ${to}`,
+      before: `${STATUS_TEXT[from] ?? from} · ${KIND_TEXT[row.kind] ?? row.kind}`,
+      after: category === 'assign' ? `${to} · ${actor.email}` : to,
+      note,
+      details: { submission: row.reference, kind: row.kind, from, to: row.status, ...(extra ?? {}) },
+    });
+  }
 }
+
+const money = (v: string) => (v && !Number.isNaN(Number(v.replace(/,/g, ''))) ? `$${Number(v.replace(/,/g, '')).toFixed(2)}` : v || '—');
+const pctText = (before: string, after: string) => {
+  const a = Number(before.replace(/,/g, ''));
+  const b = Number(after.replace(/,/g, ''));
+  if (!a || Number.isNaN(a) || Number.isNaN(b)) return '';
+  const p = ((b - a) / a) * 100;
+  return ` (${p >= 0 ? '+' : '−'}${Math.abs(p).toFixed(1)}%)`;
+};
 
 /** Live: on sale or suspended. A product with only DRAFT or ARCHIVED SKUs goes through review as new. */
 function isLive(variants: { status: string }[]): boolean {
