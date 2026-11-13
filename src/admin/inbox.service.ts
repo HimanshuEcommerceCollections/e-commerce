@@ -47,7 +47,8 @@ export class AdminInboxService {
   async counts() {
     const [supportOpen, sellerApplicationsNew, reviewsPending, submissionsOpen] = await Promise.all([
       this.prisma.supportMessage.count({ where: { status: 'OPEN' } }),
-      this.prisma.sellerApplication.count({ where: { status: 'NEW' } }),
+      // Undecided applications; drafts still being filled in by the applicant don't count.
+      this.prisma.sellerApplication.count({ where: { status: 'NEW', stage: { not: 'DRAFT' } } }),
       this.prisma.productReview.count({ where: { status: 'PENDING', deleted: false } }),
       this.prisma.productSubmission.count({ where: { status: { in: SUBMISSIONS_AWAITING_REVIEW } } }),
     ]);
@@ -97,6 +98,7 @@ export class AdminInboxService {
 
   async listApplications(filter: InboxFilter<SellerApplicationStatus>, pageable: Pageable) {
     const where: Prisma.SellerApplicationWhereInput = {
+      stage: { not: 'DRAFT' },
       ...(filter.status && { status: filter.status }),
       ...(filter.search && {
         OR: (['fullName', 'email', 'reference', 'phone', 'city'] as const).map((f) => ({

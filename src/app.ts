@@ -36,6 +36,7 @@ import {
 } from './routes';
 import { gootenRoutes } from './vendor/gooten/gooten.routes';
 import { integrationRoutes } from './integrations/integration.routes';
+import { adminSupplierRoutes, sellerDocumentRoutes, sellerOnboardingRoutes } from './supplier/supplier.routes';
 
 export function createApp(c: Container): Express {
   const app = express();
@@ -86,10 +87,13 @@ export function createApp(c: Container): Express {
   app.use('/api/orders', orderRoutes(c));
   app.use('/api/support', supportRoutes(c));
   app.use('/api/seller-applications', sellerApplicationRoutes(c));
+  // Signed-in applicants (not under /api/seller-applications, whose public form is rate limited).
+  app.use('/api/seller-onboarding', sellerOnboardingRoutes(c));
   app.use('/api/analytics', analyticsRoutes(c));
   // Admin-only operations first: their per-route guards let catalog paths fall through.
   app.use('/api/admin', adminOpsRoutes(c));
   app.use('/api/admin', adminInboxRoutes(c));
+  app.use('/api/admin', adminSupplierRoutes(c));
   app.use('/api/admin', adminPromotionRoutes(c));
   app.use('/api/admin', adminReviewRoutes(c));
   app.use('/api/admin', adminGiftCardRoutes(c));
@@ -99,6 +103,8 @@ export function createApp(c: Container): Express {
   app.use('/api/admin', adminAuditRoutes(c));
   app.use('/api/admin', integrationRoutes(c));
   app.use('/api/admin', gootenRoutes(c));
+  // Supplier documents first: per-route guards, other /api/seller paths fall through.
+  app.use('/api/seller', sellerDocumentRoutes(c));
   app.use('/api/seller', sellerRoutes(c));
 
   app.use(notFoundHandler);

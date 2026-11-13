@@ -52,6 +52,7 @@ import { AddressService } from './user/address.service';
 import { IntegrationService } from './integrations/integration.service';
 import { SecretBox } from './integrations/secret-box';
 import { GootenService } from './vendor/gooten/gooten.service';
+import { SupplierOnboardingService } from './supplier/onboarding.service';
 
 /** Every service, wired once. Tests build one with a scripted gateway. */
 export interface Container {
@@ -136,6 +137,8 @@ export interface Container {
   integrations: IntegrationService;
   /** Gooten print-on-demand vendor: catalog import and order hand-off. */
   gooten: GootenService;
+  /** Supplier onboarding: applications, screening, scorecard, documents, approval and suspension. */
+  supplierOnboarding: SupplierOnboardingService;
 }
 
 export function createContainer(
@@ -231,5 +234,6 @@ export function createContainer(
     privacy: new PrivacyService(prisma, mailer, config, sessions, paymentMethods),
     integrations,
     gooten: new GootenService(prisma, integrations, catalogAdmin, config.integrations.timeoutMs, config.order.currency),
+    supplierOnboarding: new SupplierOnboardingService(prisma, mailer, auth, config, audit),
   };
 }
