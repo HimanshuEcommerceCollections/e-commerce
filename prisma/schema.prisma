@@ -125,6 +125,7 @@ model ParentProduct {
   variants    Product[]
   submissions ProductSubmission[]
   reviews     ProductReview[]
+  vendorLink  VendorProductLink?
 
   @@index([categoryId], map: "idx_parent_products_category_id")
   @@index([subcategoryId], map: "idx_parent_products_subcategory_id")
@@ -323,6 +324,7 @@ model Order {
   shipments     Shipment[]
   returns       OrderReturn[]
   notifications Notification[]
+  vendorOrders  VendorOrder[]
 
   @@index([userId, deleted], map: "idx_orders_user_id")
   @@index([customerEmail], map: "idx_orders_customer_email")
@@ -846,4 +848,75 @@ model DataExportRequest {
 
   @@index([userId, createdAt], map: "idx_data_export_requests_user")
   @@map("data_export_requests")
+}
+
+/// A connection to a vendor's API, managed in Admin › Settings › API integrations.
+/// `provider` picks the built-in adapter (GOOTEN) or CUSTOM (credentials only).
+model Integration {
+  id        String   @id @default(uuid()) @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  /// URL key of the integration's admin tab, e.g. "gooten".
+  slug      String   @unique(map: "uk_integrations_slug") @db.VarChar(60)
+  name      String   @db.VarChar(100)
+  provider  String   @db.VarChar(30)
+  enabled   Boolean  @default(true)
+  baseUrl   String?  @map("base_url") @db.VarChar(2048)
+  /// Non-secret options, e.g. {"testMode": true}.
+  settings  Json     @default("{}")
+  /// AES-256-GCM sealed JSON {"NAME": "value"}. Never sent to clients.
+  secrets   String?
+  notes     String?  @db.VarChar(2000)
+  createdBy String?  @map("created_by") @db.VarChar(255)
+  updatedBy String?  @map("updated_by") @db.VarChar(255)
+
+  @@map("integrations")
+}
+
+/// A catalog product that a vendor makes and ships (print on demand). Its SKUs
+/// carry supplier_id = the vendor; sku_map links our SKUs to the vendor's.
+model VendorProductLink {
+  id              String        @id @default(uuid()) @db.Uuid
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+  /// GOOTEN
+  vendor          String        @db.VarChar(20)
+  vendorProductId String        @map("vendor_product_id") @db.VarChar(100)
+  vendorName      String        @map("vendor_name") @db.VarChar(255)
+  parentProductId String        @unique(map: "uk_vendor_product_links_parent") @map("parent_product_id") @db.Uuid
+  /// {"<our SKU>": "<vendor SKU>"}
+  skuMap          Json          @default("{}") @map("sku_map")
+  /// Artwork the vendor prints on every unit; required before an order can be sent.
+  printFileUrl    String?       @map("print_file_url") @db.VarChar(2048)
+  markupPercent   Decimal       @map("markup_percent") @db.Decimal(6, 2)
+  importedBy      String?       @map("imported_by") @db.VarChar(255)
+  parent          ParentProduct @relation(fields: [parentProductId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_vendor_product_links_parent")
+
+  @@index([vendor, vendorProductId], map: "idx_vendor_product_links_vendor_product")
+  @@map("vendor_product_links")
+}
+
+/// One attempt to hand an order's vendor items to the vendor.
+model VendorOrder {
+  id            String   @id @default(uuid()) @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  vendor        String   @db.VarChar(20)
+  orderId       String   @map("order_id") @db.Uuid
+  /// The vendor's order ID; null when the vendor rejected the order.
+  vendorOrderId String?  @map("vendor_order_id") @db.VarChar(100)
+  /// SUBMITTED | FAILED, then the vendor's own status once refreshed.
+  status        String   @db.VarChar(60)
+  testMode      Boolean  @map("test_mode")
+  shipMethod    String   @map("ship_method") @db.VarChar(20)
+  /// The request sent (billing key removed) and the vendor's last answer.
+  request       Json     @default("{}")
+  response      Json?
+  error         String?  @db.VarChar(2000)
+  submittedBy   String?  @map("submitted_by") @db.VarChar(255)
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_vendor_orders_order")
+
+  @@index([orderId], map: "idx_vendor_orders_order")
+  @@index([vendor, createdAt], map: "idx_vendor_orders_vendor_created")
+  @@map("vendor_orders")
 }

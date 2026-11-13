@@ -47,6 +47,9 @@ import type { ShippingProvider } from './shipping/shipping-provider';
 import { SupportService } from './support/support.service';
 import { AccountService } from './user/account.service';
 import { AddressService } from './user/address.service';
+import { IntegrationService } from './integrations/integration.service';
+import { SecretBox } from './integrations/secret-box';
+import { GootenService } from './vendor/gooten/gooten.service';
 
 /** Every service, wired once. Tests build one with a scripted gateway. */
 export interface Container {
@@ -123,6 +126,10 @@ export interface Container {
   paymentMethods: PaymentMethodService;
   /** Data export and account deletion. */
   privacy: PrivacyService;
+  /** Vendor API connections with sealed secrets (Settings › API integrations). */
+  integrations: IntegrationService;
+  /** Gooten print-on-demand vendor: catalog import and order hand-off. */
+  gooten: GootenService;
 }
 
 export function createContainer(
@@ -141,7 +148,7 @@ export function createContainer(
 
   const jwt = new JwtService(config.jwt.secret, config.jwt.expirationMs);
   const webhookStore = new WebhookEventStore(prisma);
-  const mailer = new Mailer(prisma, config.mail.provider);
+  const mailer = new Mailer(prisma, config.mail);
   const analytics = new AnalyticsService(prisma);
   const orders = new OrderService(prisma, gateway, config, { mailer, analytics });
   const sessions = new SessionService(prisma, Math.max(config.jwt.expirationMs, config.jwt.rememberExpirationMs));
@@ -157,6 +164,8 @@ export function createContainer(
   const cart = new CartService(prisma, pricingRules(config), config.order.currency, promotions);
   const savedItems = new SavedItemService(prisma, cart);
   const customerReturns = new CustomerReturnService(prisma, config);
+  const catalogAdmin = new CatalogAdminService(prisma, catalogImport, imageChecks, config.inventory.lowStockThreshold);
+  const integrations = new IntegrationService(prisma, new SecretBox(config.integrations.encryptionKey), config.integrations.timeoutMs);
 
   return {
     config,
@@ -176,7 +185,7 @@ export function createContainer(
     catalogUpdates: new CatalogBulkUpdateService(prisma, catalogReader),
     catalogExport,
     imageChecks,
-    catalogAdmin: new CatalogAdminService(prisma, catalogImport, imageChecks, config.inventory.lowStockThreshold),
+    catalogAdmin,
     submissions: new SellerSubmissionService(prisma, catalogReader, catalogImport, catalogExport, imageChecks, mailer, config),
     cart,
     orders,
@@ -210,5 +219,7 @@ export function createContainer(
     giftCards: new GiftCardService(prisma, mailer, config),
     paymentMethods,
     privacy: new PrivacyService(prisma, mailer, config, sessions, paymentMethods),
+    integrations,
+    gooten: new GootenService(prisma, integrations, catalogAdmin, config.integrations.timeoutMs, config.order.currency),
   };
 }

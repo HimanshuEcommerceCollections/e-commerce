@@ -72,6 +72,13 @@ export const VariantUpdateSchema = z.object({
   metaDescription: optionalString({ max: 500 }),
 });
 
+export const BulkDeleteSchema = z.object({
+  parentIds: z
+    .array(requiredUuid(), { invalid_type_error: 'must be an array', required_error: 'must not be null' })
+    .min(1, 'must not be empty')
+    .max(1000, 'size must be between 1 and 1000'),
+});
+
 export const BulkStatusSchema = z.object({
   parentIds: z
     .array(requiredUuid(), { invalid_type_error: 'must be an array', required_error: 'must not be null' })
@@ -307,6 +314,44 @@ export class CatalogAdminService {
       data: { status: input.status },
     });
     return { products: new Set(input.parentIds).size, variantsUpdated: count, status: input.status };
+  }
+
+  /**
+   * Removes products (and all their SKUs) from the catalog and inventory.
+   * Soft delete: order lines keep their own name/SKU snapshot, so history
+   * stays intact. The SKU, parent code and URL slug are released (renamed to
+   * `…~del~<id>` / cleared) so the same products can be imported again later.
+   * Live cart lines and saved items pointing at them are removed.
+   */
+  async deleteProducts(input: z.output<typeof BulkDeleteSchema>) {
+    return this.prisma.$transaction(async (tx) => {
+      const parents = await tx.parentProduct.findMany({
+        where: { id: { in: [...new Set(input.parentIds)] }, deleted: false },
+        select: { id: true },
+      });
+      const parentIds = parents.map((p) => p.id);
+      if (!parentIds.length) return { products: 0, variantsDeleted: 0 };
+      const variantIds = (
+        await tx.product.findMany({ where: { parentId: { in: parentIds }, deleted: false }, select: { id: true } })
+      ).map((v) => v.id);
+
+      // 59 + '~del~' (5) + uuid (36) = 100, the column width; the id keeps it unique.
+      const variantsDeleted = await tx.$executeRaw`
+        UPDATE products
+           SET deleted = true, status = 'INACTIVE', url_slug = NULL, updated_at = now(),
+               sku = left(sku, 59) || '~del~' || id::text
+         WHERE id = ANY(${variantIds}::uuid[])`;
+      await tx.$executeRaw`
+        UPDATE parent_products
+           SET deleted = true, updated_at = now(), code = left(code, 59) || '~del~' || id::text
+         WHERE id = ANY(${parentIds}::uuid[])`;
+      if (variantIds.length) {
+        await tx.productImage.updateMany({ where: { productId: { in: variantIds }, deleted: false }, data: { deleted: true } });
+        await tx.cartItem.updateMany({ where: { productId: { in: variantIds }, deleted: false }, data: { deleted: true } });
+        await tx.savedItem.deleteMany({ where: { productId: { in: variantIds } } });
+      }
+      return { products: parentIds.length, variantsDeleted };
+    });
   }
 
   /**

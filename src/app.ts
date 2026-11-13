@@ -32,6 +32,8 @@ import {
   stripeRoutes,
   storeRoutes,
 } from './routes';
+import { gootenRoutes } from './vendor/gooten/gooten.routes';
+import { integrationRoutes } from './integrations/integration.routes';
 
 export function createApp(c: Container): Express {
   const app = express();
@@ -91,6 +93,8 @@ export function createApp(c: Container): Express {
   app.use('/api/admin', adminGiftCardRoutes(c));
   app.use('/api/admin', adminCatalogRoutes(c));
   app.use('/api/admin', adminSubmissionRoutes(c));
+  app.use('/api/admin', integrationRoutes(c));
+  app.use('/api/admin', gootenRoutes(c));
   app.use('/api/seller', sellerRoutes(c));
 
   app.use(notFoundHandler);

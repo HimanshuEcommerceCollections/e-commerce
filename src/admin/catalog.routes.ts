@@ -9,6 +9,7 @@ import { CATALOG_ROLES } from '../routes';
 import {
   ADMIN_INVENTORY_SORTS,
   ADMIN_PRODUCT_SORTS,
+  BulkDeleteSchema,
   BulkStatusSchema,
   IMAGE_ISSUE_SORTS,
   ParentUpdateSchema,
@@ -72,6 +73,10 @@ export function adminCatalogRoutes(c: Container): Router {
   r.post('/products/status', ...staff, async (req, res) => {
     const result = await svc.setStatus(parseBody(BulkStatusSchema, req.body));
     res.json(ok(result, `${result.products} product(s) set to ${result.status}`));
+  });
+  r.post('/products/delete', ...staff, async (req, res) => {
+    const result = await svc.deleteProducts(parseBody(BulkDeleteSchema, req.body));
+    res.json(ok(result, `${result.products} product(s) deleted`));
   });
   r.get('/products/:id', ...staff, async (req, res) => {
     res.json(ok(await svc.getProduct(pathUuid(req.params.id))));

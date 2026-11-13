@@ -19,10 +19,14 @@ const RETRY_WITH_GET = (status: number) => status >= 400;
  * refused or fails (some CDNs answer HEAD with 403/405). Only the headers of a
  * GET are read; the body is cancelled. A response is broken when its status is
  * not 2xx (after redirects) or its Content-Type is not an image.
+ *
+ * With `localhostAlias` (e.g. host.docker.internal), loopback URLs are fetched
+ * through that host instead: inside a container localhost is the container,
+ * not the machine serving the images. Stored URLs are left as they are.
  */
-export function httpUrlChecker(timeoutMs: number): UrlChecker {
+export function httpUrlChecker(timeoutMs: number, localhostAlias = ''): UrlChecker {
   const attempt = async (url: string, method: 'HEAD' | 'GET'): Promise<UrlCheck & { status?: number }> => {
-    const res = await fetch(url, {
+    const res = await fetch(viaAlias(url, localhostAlias), {
       method,
       redirect: 'follow',
       signal: AbortSignal.timeout(timeoutMs),
@@ -47,6 +51,21 @@ export function httpUrlChecker(timeoutMs: number): UrlChecker {
       return { ok: false, error: describe(e, timeoutMs) };
     }
   };
+}
+
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/** `url` with a loopback host replaced by `alias` (unchanged without one). */
+export function viaAlias(url: string, alias: string): string {
+  if (!alias) return url;
+  try {
+    const u = new URL(url);
+    if (!LOOPBACK.has(u.hostname)) return url;
+    u.hostname = alias;
+    return u.toString();
+  } catch {
+    return url;
+  }
 }
 
 function describe(e: unknown, timeoutMs: number): string {
@@ -86,8 +105,8 @@ export async function checkUrls(
 export class ImageCheckService {
   constructor(
     private readonly prisma: PrismaClient,
-    private readonly settings: { enabled: boolean; timeoutMs: number },
-    private readonly checker: UrlChecker = httpUrlChecker(settings.timeoutMs),
+    private readonly settings: { enabled: boolean; timeoutMs: number; localhostAlias?: string },
+    private readonly checker: UrlChecker = httpUrlChecker(settings.timeoutMs, settings.localhostAlias),
   ) {}
 
   get enabled() {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 /**
@@ -140,10 +141,28 @@ const EnvSchema = z.object({
   // Customer reviews go live without moderation.
   REVIEWS_AUTO_PUBLISH: bool(false),
   STRIPE_PUBLISHABLE_KEY: z.string().default(''),
-  MAIL_PROVIDER: z.enum(['log']).default('log'),
+  // log: store + log only. smtp: also deliver through the SMTP server below.
+  MAIL_PROVIDER: z.enum(['log', 'smtp']).default('log'),
+  // Port 465 = implicit TLS (SMTP_SECURE=true), 587 = STARTTLS (SMTP_SECURE=false).
+  SMTP_HOST: z.string().default(''),
+  SMTP_PORT: int(587),
+  SMTP_SECURE: bool(false),
+  SMTP_USER: z.string().default(''),
+  SMTP_PASS: z.string().default(''),
+  // From header; defaults to "STORE_NAME <SMTP_USER>".
+  MAIL_FROM: z.string().default(''),
   IMAGE_CHECKS_ENABLED: bool(true),
   IMAGE_CHECK_TIMEOUT_MS: int(5000),
+  // Host that image checks use for localhost URLs (Docker: host.docker.internal).
+  IMAGE_CHECK_LOCALHOST_ALIAS: z.string().default(''),
   PASSWORD_RESET_TTL_MINUTES: int(60),
+
+  // ── Vendor API integrations (Admin › Settings › API integrations) ──
+  // Seals the vendor secrets stored in the database. Any string; when unset a
+  // key is derived from JWT_SECRET, so changing JWT_SECRET then means
+  // re-entering the secrets. Set it once and keep it.
+  INTEGRATIONS_ENCRYPTION_KEY: z.string().default(''),
+  VENDOR_API_TIMEOUT_MS: int(20_000),
 });
 
 /** A shipping method's price and delivery promise. */
@@ -195,9 +214,15 @@ export interface Config {
   };
   returns: { windowDays: number };
   reviews: { autoPublish: boolean };
-  mail: { provider: 'log' };
-  imageChecks: { enabled: boolean; timeoutMs: number };
+  mail: import('./notify/mailer').MailConfig;
+  imageChecks: { enabled: boolean; timeoutMs: number; localhostAlias: string };
   passwordReset: { ttlMinutes: number };
+  integrations: {
+    /** 32-byte AES key for vendor secrets. */
+    encryptionKey: Buffer;
+    /** Per request to a vendor API. */
+    timeoutMs: number;
+  };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -217,6 +242,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`Invalid configuration — ${problems}`);
   }
   const e = parsed.data;
+  if (e.MAIL_PROVIDER === 'smtp' && (!e.SMTP_HOST || !e.SMTP_USER || !e.SMTP_PASS)) {
+    throw new Error('Invalid configuration — MAIL_PROVIDER=smtp needs SMTP_HOST, SMTP_USER and SMTP_PASS');
+  }
 
   const databaseUrl =
     e.DATABASE_URL ??
@@ -269,8 +297,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     },
     returns: { windowDays: e.RETURN_WINDOW_DAYS },
     reviews: { autoPublish: e.REVIEWS_AUTO_PUBLISH },
-    mail: { provider: e.MAIL_PROVIDER },
-    imageChecks: { enabled: e.IMAGE_CHECKS_ENABLED, timeoutMs: e.IMAGE_CHECK_TIMEOUT_MS },
+    mail: {
+      provider: e.MAIL_PROVIDER,
+      from: e.MAIL_FROM || (e.SMTP_USER ? `"${e.STORE_NAME}" <${e.SMTP_USER}>` : ''),
+      smtp: {
+        host: e.SMTP_HOST,
+        port: e.SMTP_PORT,
+        secure: e.SMTP_SECURE,
+        user: e.SMTP_USER,
+        // Google shows app passwords in groups of four; the spaces are not part of it.
+        pass: e.SMTP_PASS.replace(/\s+/g, ''),
+      },
+    },
+    imageChecks: {
+      enabled: e.IMAGE_CHECKS_ENABLED,
+      timeoutMs: e.IMAGE_CHECK_TIMEOUT_MS,
+      localhostAlias: e.IMAGE_CHECK_LOCALHOST_ALIAS.trim(),
+    },
     passwordReset: { ttlMinutes: e.PASSWORD_RESET_TTL_MINUTES },
+    integrations: {
+      encryptionKey: createHash('sha256')
+        .update(e.INTEGRATIONS_ENCRYPTION_KEY || `integrations:${e.JWT_SECRET}`)
+        .digest(),
+      timeoutMs: e.VENDOR_API_TIMEOUT_MS,
+    },
   };
 }
