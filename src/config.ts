@@ -156,6 +156,13 @@ const EnvSchema = z.object({
   // Host that image checks use for localhost URLs (Docker: host.docker.internal).
   IMAGE_CHECK_LOCALHOST_ALIAS: z.string().default(''),
   PASSWORD_RESET_TTL_MINUTES: int(60),
+  // ── Review queue automatic checks ──
+  // Comma-separated brands sellers may not list (case-insensitive); empty = none.
+  REVIEW_RESTRICTED_BRANDS: z.string().default(''),
+  // Minimum margin over cost, in percent of the selling price.
+  REVIEW_MARGIN_FLOOR_PERCENT: z.coerce.number().min(0).max(100).default(15),
+  // A price change of at least this many percent is flagged for a closer look.
+  REVIEW_BIG_PRICE_CHANGE_PERCENT: z.coerce.number().min(0).max(1000).default(30),
 
   // ── Vendor API integrations (Admin › Settings › API integrations) ──
   // Seals the vendor secrets stored in the database. Any string; when unset a
@@ -217,6 +224,8 @@ export interface Config {
   mail: import('./notify/mailer').MailConfig;
   imageChecks: { enabled: boolean; timeoutMs: number; localhostAlias: string };
   passwordReset: { ttlMinutes: number };
+  /** Review queue automatic checks. */
+  reviewChecks: { restrictedBrands: string[]; marginFloorPercent: number; bigPriceChangePercent: number };
   integrations: {
     /** 32-byte AES key for vendor secrets. */
     encryptionKey: Buffer;
@@ -315,6 +324,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       localhostAlias: e.IMAGE_CHECK_LOCALHOST_ALIAS.trim(),
     },
     passwordReset: { ttlMinutes: e.PASSWORD_RESET_TTL_MINUTES },
+    reviewChecks: {
+      restrictedBrands: e.REVIEW_RESTRICTED_BRANDS.split(',').map((b) => b.trim()).filter(Boolean),
+      marginFloorPercent: e.REVIEW_MARGIN_FLOOR_PERCENT,
+      bigPriceChangePercent: e.REVIEW_BIG_PRICE_CHANGE_PERCENT,
+    },
     integrations: {
       encryptionKey: createHash('sha256')
         .update(e.INTEGRATIONS_ENCRYPTION_KEY || `integrations:${e.JWT_SECRET}`)

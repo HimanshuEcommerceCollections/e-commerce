@@ -10,6 +10,7 @@ import { loadConfig } from '../config';
  *   SEED_ADMIN_EMAIL    / SEED_ADMIN_PASSWORD      ROLE_ADMIN
  *   SEED_CATALOG_EMAIL  / SEED_CATALOG_PASSWORD    ROLE_CATALOG
  *   SEED_CUSTOMER_EMAIL / SEED_CUSTOMER_PASSWORD   ROLE_CUSTOMER
+ *   SEED_SELLER_EMAIL   / SEED_SELLER_PASSWORD     ROLE_MERCHANT (Seller Portal at /merchant)
  *
  * An account without both variables is skipped. Idempotent: upserts by email
  * and resets the password, so the environment stays the source of truth.
@@ -31,6 +32,7 @@ const KINDS = {
   ADMIN: { role: 'ROLE_ADMIN', fullName: 'Store Admin' },
   CATALOG: { role: 'ROLE_CATALOG', fullName: 'Catalog Team' },
   CUSTOMER: { role: 'ROLE_CUSTOMER', fullName: 'Test Customer' },
+  SELLER: { role: 'ROLE_MERCHANT', fullName: 'Test Seller' },
 } as const;
 
 export type AccountKind = keyof typeof KINDS;

@@ -42,6 +42,8 @@ import { ImageCheckService } from './product/image-check';
 import { pricingRules } from './order/pricing';
 import { ProductService } from './product/product.service';
 import { SellerSubmissionService } from './seller/submission.service';
+import { ReviewQueueService } from './seller/review-queue.service';
+import { AuditService } from './audit/audit.service';
 import { ManualShippingProvider } from './shipping/manual-provider';
 import type { ShippingProvider } from './shipping/shipping-provider';
 import { SupportService } from './support/support.service';
@@ -50,6 +52,7 @@ import { AddressService } from './user/address.service';
 import { IntegrationService } from './integrations/integration.service';
 import { SecretBox } from './integrations/secret-box';
 import { GootenService } from './vendor/gooten/gooten.service';
+import { SupplierOnboardingService } from './supplier/onboarding.service';
 
 /** Every service, wired once. Tests build one with a scripted gateway. */
 export interface Container {
@@ -82,6 +85,10 @@ export interface Container {
   catalogAdmin: CatalogAdminService;
   /** Seller portal: submissions, review decisions and seller stock. */
   submissions: SellerSubmissionService;
+  /** Review queue tabs, automatic checks, structured decisions and bulk approval. */
+  reviewQueue: ReviewQueueService;
+  /** Catalog audit log: append-only; `record` never throws. */
+  audit: AuditService;
   cart: CartService;
   orders: OrderService;
   /** Account home tiles (contract C1). */
@@ -130,6 +137,8 @@ export interface Container {
   integrations: IntegrationService;
   /** Gooten print-on-demand vendor: catalog import and order hand-off. */
   gooten: GootenService;
+  /** Supplier onboarding: applications, screening, scorecard, documents, approval and suspension. */
+  supplierOnboarding: SupplierOnboardingService;
 }
 
 export function createContainer(
@@ -166,6 +175,8 @@ export function createContainer(
   const customerReturns = new CustomerReturnService(prisma, config);
   const catalogAdmin = new CatalogAdminService(prisma, catalogImport, imageChecks, config.inventory.lowStockThreshold);
   const integrations = new IntegrationService(prisma, new SecretBox(config.integrations.encryptionKey), config.integrations.timeoutMs);
+  const audit = new AuditService(prisma);
+  const submissions = new SellerSubmissionService(prisma, catalogReader, catalogImport, catalogExport, imageChecks, mailer, config, audit);
 
   return {
     config,
@@ -186,7 +197,9 @@ export function createContainer(
     catalogExport,
     imageChecks,
     catalogAdmin,
-    submissions: new SellerSubmissionService(prisma, catalogReader, catalogImport, catalogExport, imageChecks, mailer, config),
+    submissions,
+    reviewQueue: new ReviewQueueService(prisma, catalogExport, submissions, audit, config.reviewChecks),
+    audit,
     cart,
     orders,
     accountSummary: new AccountSummaryService(prisma, orders, customerReturns, savedItems),
@@ -221,5 +234,6 @@ export function createContainer(
     privacy: new PrivacyService(prisma, mailer, config, sessions, paymentMethods),
     integrations,
     gooten: new GootenService(prisma, integrations, catalogAdmin, config.integrations.timeoutMs, config.order.currency),
+    supplierOnboarding: new SupplierOnboardingService(prisma, mailer, auth, config, audit),
   };
 }

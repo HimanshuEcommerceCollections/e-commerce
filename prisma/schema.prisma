@@ -62,6 +62,8 @@ model User {
   sessions            UserSession[]
   otpChallenges       OtpChallenge[]
   dataExports         DataExportRequest[]
+  sellerApplication   SellerApplication?
+  sellerDocuments     SellerDocument[]
 
   @@map("users")
 }
@@ -566,8 +568,80 @@ model SellerApplication {
   handledBy  String?   @map("handled_by") @db.VarChar(255)
   updatedAt  DateTime? @map("updated_at") @db.Timestamptz(6)
 
+  // ── Supplier onboarding (8_supplier_onboarding) ──
+  /// The applicant's account; null for legacy "Sell with us" leads until approval.
+  userId                    String?   @unique(map: "uk_seller_applications_user") @map("user_id") @db.Uuid
+  /// DRAFT | APPLIED | SCREENED | SCORECARD | DOCUMENTS | APPROVED | DECLINED | AUTO_REJECTED | SUSPENDED
+  stage                     String    @default("APPLIED") @db.VarChar(20)
+  stageChangedAt            DateTime? @map("stage_changed_at") @db.Timestamptz(6)
+  companyName               String?   @map("company_name") @db.VarChar(200)
+  /// The multi-step application form (draft while stage = DRAFT).
+  form                      Json      @default("{}")
+  formStep                  Int       @default(0) @map("form_step")
+  submittedAt               DateTime? @map("submitted_at") @db.Timestamptz(6)
+  /// [{ key, label, passed }], run on submit.
+  screening                 Json?
+  screenedAt                DateTime? @map("screened_at") @db.Timestamptz(6)
+  screeningOverriddenBy     String?   @map("screening_overridden_by") @db.VarChar(255)
+  screeningOverriddenAt     DateTime? @map("screening_overridden_at") @db.Timestamptz(6)
+  /// { criterionKey: 1..5 }
+  scores                    Json      @default("{}")
+  /// Weighted total (0–100) once every criterion is scored.
+  score                     Int?
+  scoreOverride             Int?      @map("score_override")
+  scoreOverrideReason       String?   @map("score_override_reason") @db.VarChar(500)
+  scoreNote                 String?   @map("score_note") @db.VarChar(2000)
+  scoredBy                  String?   @map("scored_by") @db.VarChar(255)
+  scoredAt                  DateTime? @map("scored_at") @db.Timestamptz(6)
+  declineReason             String?   @map("decline_reason") @db.VarChar(2000)
+  declinedBy                String?   @map("declined_by") @db.VarChar(255)
+  declinedAt                DateTime? @map("declined_at") @db.Timestamptz(6)
+  approvedBy                String?   @map("approved_by") @db.VarChar(255)
+  approvedAt                DateTime? @map("approved_at") @db.Timestamptz(6)
+  resaleCertificateIssuedAt DateTime? @map("resale_certificate_issued_at") @db.Timestamptz(6)
+  suspensionReason          String?   @map("suspension_reason") @db.VarChar(500)
+  suspendedBy               String?   @map("suspended_by") @db.VarChar(255)
+  suspendedAt               DateTime? @map("suspended_at") @db.Timestamptz(6)
+  reinstatedAt              DateTime? @map("reinstated_at") @db.Timestamptz(6)
+  lastReminderAt            DateTime? @map("last_reminder_at") @db.Timestamptz(6)
+
+  user      User?            @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_seller_applications_user")
+  documents SellerDocument[]
+
   @@index([status, createdAt], map: "idx_seller_applications_status")
+  @@index([stage, submittedAt], map: "idx_seller_applications_stage")
   @@map("seller_applications")
+}
+
+/// A supplier document (W-9, signed agreement, insurance certificate), stored
+/// in the database so it works on serverless hosts. A new upload of a type
+/// supersedes the previous one: uniq_seller_documents_current, SQL only.
+model SellerDocument {
+  id            String    @id @default(uuid()) @db.Uuid
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  userId        String    @map("user_id") @db.Uuid
+  applicationId String?   @map("application_id") @db.Uuid
+  /// W9 | AGREEMENT | INSURANCE
+  type          String    @db.VarChar(30)
+  fileName      String    @map("file_name") @db.VarChar(255)
+  contentType   String    @map("content_type") @db.VarChar(100)
+  sizeBytes     Int       @map("size_bytes")
+  content       Bytes
+  /// PENDING | VERIFIED | REJECTED | EXPIRED
+  status        String    @default("PENDING") @db.VarChar(20)
+  expiresAt     DateTime? @map("expires_at") @db.Date
+  note          String?   @db.VarChar(1000)
+  reviewedBy    String?   @map("reviewed_by") @db.VarChar(255)
+  reviewedAt    DateTime? @map("reviewed_at") @db.Timestamptz(6)
+  supersededAt  DateTime? @map("superseded_at") @db.Timestamptz(6)
+
+  user        User               @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_seller_documents_user")
+  application SellerApplication? @relation(fields: [applicationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_seller_documents_application")
+
+  @@index([userId, type, createdAt], map: "idx_seller_documents_user")
+  @@index([applicationId], map: "idx_seller_documents_application")
+  @@map("seller_documents")
 }
 
 /// Seller portal: one seller change awaiting the catalog team (3_seller_portal).
@@ -919,4 +993,52 @@ model VendorOrder {
   @@index([orderId], map: "idx_vendor_orders_order")
   @@index([vendor, createdAt], map: "idx_vendor_orders_vendor_created")
   @@map("vendor_orders")
+}
+
+/// Catalog audit log (7_audit_log): who changed what, when, from where and the
+/// previous value. Append-only: a trigger rejects UPDATE and DELETE. No FKs, so
+/// records outlive the users and products they mention.
+model AuditEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  /// Display number, shown as EV-<seq>.
+  seq         BigInt   @unique(map: "uk_audit_events_seq") @default(autoincrement())
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  /// Dotted event type, e.g. product.status_changed, stock.changed, submission.approved.
+  action      String   @db.VarChar(60)
+  /// Filter group: stock | price | submit | edit | decision | assign | status | product | import | delist | unpub | supplier | doc | integration
+  category    String   @db.VarChar(20)
+  actorId     String?  @map("actor_id") @db.Uuid
+  actorEmail  String?  @map("actor_email") @db.VarChar(255)
+  actorName   String?  @map("actor_name") @db.VarChar(200)
+  actorRole   String?  @map("actor_role") @db.VarChar(20)
+  /// team | seller | system
+  actorType   String   @map("actor_type") @db.VarChar(10)
+  /// Where the change came from, e.g. "Review queue", "Bulk upload", "Admin catalog".
+  source      String   @db.VarChar(100)
+  /// product | variant | submission | supplier | document | integration | import
+  entityType  String   @map("entity_type") @db.VarChar(30)
+  entityId    String?  @map("entity_id") @db.VarChar(100)
+  /// SKU, product code, submission reference…
+  entityCode  String?  @map("entity_code") @db.VarChar(255)
+  entityLabel String?  @map("entity_label") @db.VarChar(255)
+  /// The seller whose item it is, for the seller filter.
+  sellerId    String?  @map("seller_id") @db.Uuid
+  sellerName  String?  @map("seller_name") @db.VarChar(200)
+  summary     String   @db.VarChar(500)
+  beforeValue String?  @map("before_value") @db.VarChar(500)
+  afterValue  String?  @map("after_value") @db.VarChar(500)
+  note        String?  @db.VarChar(2000)
+  /// Set when the change needs the catalog team's eye (stock to zero, a big drop).
+  alert       String?  @db.VarChar(255)
+  /// Structured before/after and anything else worth keeping.
+  details     Json     @default("{}")
+
+  @@index([createdAt(sort: Desc)], map: "idx_audit_events_created")
+  @@index([entityType, entityId, createdAt], map: "idx_audit_events_entity")
+  @@index([entityCode, createdAt], map: "idx_audit_events_entity_code")
+  @@index([actorId, createdAt], map: "idx_audit_events_actor")
+  @@index([action, createdAt], map: "idx_audit_events_action")
+  @@index([category, createdAt], map: "idx_audit_events_category")
+  @@index([sellerId, createdAt], map: "idx_audit_events_seller")
+  @@map("audit_events")
 }
