@@ -128,3 +128,41 @@ describe('admin API', () => {
     expect((await as(admin).get('/api/admin/orders?status=NOPE')).status).toBe(400);
   });
 });
+
+describe('admin bulk delete', () => {
+  it('removes products from the catalog, inventory and carts, and frees their SKUs for re-import', async () => {
+    const tag = randomUUID().slice(0, 8).toUpperCase();
+    const category = await fixtures.newCategory(`Del ${tag}`, `del-${tag.toLowerCase()}`);
+    const csv = [
+      'SKU_ID,Parent_Product_ID,Product_Name,Brand,Category,Product_Status,Color,Size,Selling_Price,Inventory_Qty,Image_1_URL',
+      `D-${tag}-1,DP-${tag},Gone ${tag},Nexus,${category.slug},ACTIVE,Red,M,10,5,https://cdn.test.local/d.jpg`,
+      `D-${tag}-2,DP-${tag},Gone ${tag},Nexus,${category.slug},ACTIVE,Blue,M,10,5,https://cdn.test.local/e.jpg`,
+    ].join('\n');
+    const importIt = () =>
+      container.catalogImport.importFile({ originalname: 'del.csv', buffer: Buffer.from(csv) }, randomUUID());
+    expect((await importIt()).errors).toEqual([]);
+    const parent = await prisma.parentProduct.findUniqueOrThrow({ where: { code: `DP-${tag}` } });
+    const variant = await prisma.product.findUniqueOrThrow({ where: { sku: `D-${tag}-1` } });
+    const shopper = await fixtures.newCustomer();
+    await fixtures.addToCart(shopper.id, variant.id, 1);
+
+    const res = await as(admin).post('/api/admin/products/delete', { parentIds: [parent.id] });
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ products: 1, variantsDeleted: 2 });
+
+    const list = await as(admin).get(`/api/admin/products?categoryId=${category.id}`);
+    expect(list.body.data.totalElements).toBe(0);
+    const inventory = await as(admin).get(`/api/admin/inventory?categoryId=${category.id}`);
+    expect(inventory.body.data.totalElements).toBe(0);
+    expect(await prisma.cartItem.count({ where: { productId: variant.id, deleted: false } })).toBe(0);
+    expect((await as(admin).get(`/api/admin/products/${parent.id}`)).status).toBe(404);
+
+    // Deleting again is a no-op; the same SKUs and code import cleanly as new products.
+    expect((await as(admin).post('/api/admin/products/delete', { parentIds: [parent.id] })).body.data.products).toBe(0);
+    expect((await importIt()).errors).toEqual([]);
+    const again = await prisma.parentProduct.findUniqueOrThrow({ where: { code: `DP-${tag}` } });
+    expect(again.id).not.toBe(parent.id);
+
+    expect((await as(admin).post('/api/admin/products/delete', { parentIds: [] })).status).toBe(400);
+  });
+});
