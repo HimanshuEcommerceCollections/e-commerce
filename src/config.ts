@@ -140,7 +140,16 @@ const EnvSchema = z.object({
   // Customer reviews go live without moderation.
   REVIEWS_AUTO_PUBLISH: bool(false),
   STRIPE_PUBLISHABLE_KEY: z.string().default(''),
-  MAIL_PROVIDER: z.enum(['log']).default('log'),
+  // log: store + log only. smtp: also deliver through the SMTP server below.
+  MAIL_PROVIDER: z.enum(['log', 'smtp']).default('log'),
+  // Port 465 = implicit TLS (SMTP_SECURE=true), 587 = STARTTLS (SMTP_SECURE=false).
+  SMTP_HOST: z.string().default(''),
+  SMTP_PORT: int(587),
+  SMTP_SECURE: bool(false),
+  SMTP_USER: z.string().default(''),
+  SMTP_PASS: z.string().default(''),
+  // From header; defaults to "STORE_NAME <SMTP_USER>".
+  MAIL_FROM: z.string().default(''),
   IMAGE_CHECKS_ENABLED: bool(true),
   IMAGE_CHECK_TIMEOUT_MS: int(5000),
   // Host that image checks use for localhost URLs (Docker: host.docker.internal).
@@ -197,7 +206,7 @@ export interface Config {
   };
   returns: { windowDays: number };
   reviews: { autoPublish: boolean };
-  mail: { provider: 'log' };
+  mail: import('./notify/mailer').MailConfig;
   imageChecks: { enabled: boolean; timeoutMs: number; localhostAlias: string };
   passwordReset: { ttlMinutes: number };
 }
@@ -219,6 +228,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`Invalid configuration — ${problems}`);
   }
   const e = parsed.data;
+  if (e.MAIL_PROVIDER === 'smtp' && (!e.SMTP_HOST || !e.SMTP_USER || !e.SMTP_PASS)) {
+    throw new Error('Invalid configuration — MAIL_PROVIDER=smtp needs SMTP_HOST, SMTP_USER and SMTP_PASS');
+  }
 
   const databaseUrl =
     e.DATABASE_URL ??
@@ -271,7 +283,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     },
     returns: { windowDays: e.RETURN_WINDOW_DAYS },
     reviews: { autoPublish: e.REVIEWS_AUTO_PUBLISH },
-    mail: { provider: e.MAIL_PROVIDER },
+    mail: {
+      provider: e.MAIL_PROVIDER,
+      from: e.MAIL_FROM || (e.SMTP_USER ? `"${e.STORE_NAME}" <${e.SMTP_USER}>` : ''),
+      smtp: {
+        host: e.SMTP_HOST,
+        port: e.SMTP_PORT,
+        secure: e.SMTP_SECURE,
+        user: e.SMTP_USER,
+        // Google shows app passwords in groups of four; the spaces are not part of it.
+        pass: e.SMTP_PASS.replace(/\s+/g, ''),
+      },
+    },
     imageChecks: {
       enabled: e.IMAGE_CHECKS_ENABLED,
       timeoutMs: e.IMAGE_CHECK_TIMEOUT_MS,

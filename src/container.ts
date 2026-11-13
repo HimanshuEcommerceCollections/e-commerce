@@ -141,7 +141,7 @@ export function createContainer(
 
   const jwt = new JwtService(config.jwt.secret, config.jwt.expirationMs);
   const webhookStore = new WebhookEventStore(prisma);
-  const mailer = new Mailer(prisma, config.mail.provider);
+  const mailer = new Mailer(prisma, config.mail);
   const analytics = new AnalyticsService(prisma);
   const orders = new OrderService(prisma, gateway, config, { mailer, analytics });
   const sessions = new SessionService(prisma, Math.max(config.jwt.expirationMs, config.jwt.rememberExpirationMs));
