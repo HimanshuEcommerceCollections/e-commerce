@@ -143,6 +143,8 @@ const EnvSchema = z.object({
   MAIL_PROVIDER: z.enum(['log']).default('log'),
   IMAGE_CHECKS_ENABLED: bool(true),
   IMAGE_CHECK_TIMEOUT_MS: int(5000),
+  // Host that image checks use for localhost URLs (Docker: host.docker.internal).
+  IMAGE_CHECK_LOCALHOST_ALIAS: z.string().default(''),
   PASSWORD_RESET_TTL_MINUTES: int(60),
 });
 
@@ -196,7 +198,7 @@ export interface Config {
   returns: { windowDays: number };
   reviews: { autoPublish: boolean };
   mail: { provider: 'log' };
-  imageChecks: { enabled: boolean; timeoutMs: number };
+  imageChecks: { enabled: boolean; timeoutMs: number; localhostAlias: string };
   passwordReset: { ttlMinutes: number };
 }
 
@@ -270,7 +272,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     returns: { windowDays: e.RETURN_WINDOW_DAYS },
     reviews: { autoPublish: e.REVIEWS_AUTO_PUBLISH },
     mail: { provider: e.MAIL_PROVIDER },
-    imageChecks: { enabled: e.IMAGE_CHECKS_ENABLED, timeoutMs: e.IMAGE_CHECK_TIMEOUT_MS },
+    imageChecks: {
+      enabled: e.IMAGE_CHECKS_ENABLED,
+      timeoutMs: e.IMAGE_CHECK_TIMEOUT_MS,
+      localhostAlias: e.IMAGE_CHECK_LOCALHOST_ALIAS.trim(),
+    },
     passwordReset: { ttlMinutes: e.PASSWORD_RESET_TTL_MINUTES },
   };
 }
