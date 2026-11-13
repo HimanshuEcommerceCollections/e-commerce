@@ -9,6 +9,7 @@ import { ValidationError, parseBody, pathUuid } from '../common/validation';
 import type { Container } from '../container';
 import { templateCsv } from '../product/importer/template';
 import { CATALOG_ROLES } from '../routes';
+import { sellerPortalRoutes } from './seller-portal.routes';
 import {
   RequiredNoteSchema,
   StockUpdateSchema,
@@ -108,6 +109,7 @@ export function sellerRoutes(c: Container): Router {
     const data = await svc.updateStock(actor(req), items);
     res.json(ok(data, `Stock updated for ${data.updated.length} SKU(s)`));
   });
+  r.use(sellerPortalRoutes(c));
   return r;
 }
 
