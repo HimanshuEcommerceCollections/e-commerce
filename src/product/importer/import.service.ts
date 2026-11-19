@@ -4,6 +4,7 @@ import { PRODUCT_STATUSES, type ProductStatus } from '../../common/enums';
 import { logger } from '../../common/logger';
 import { TX } from '../../db';
 import type { ImageCheckService, UrlCheck } from '../image-check';
+import { NO_STORED_IMAGES, type StoredImages } from '../image-upload.service';
 import { attributeKeysFor, attributeName } from './attributes';
 import { CodeAssigner, type ParentRef } from './code-assigner';
 import {
@@ -75,7 +76,7 @@ export interface CatalogImportReport {
   errors: RowError[];
   warnings: ImportWarning[];
   imageErrors: ImportImageError[];
-  /** False when image URL checks are switched off (IMAGE_CHECKS_ENABLED=false). */
+  /** False when image URL checks are switched off (IMAGE_CHECKS in src/config.ts, or off in tests). */
   imagesChecked: boolean;
   durationMs: number;
 }
@@ -224,6 +225,8 @@ export class CatalogImportService {
     private readonly reader: CatalogFileReader,
     private readonly images: ImageCheckService,
     private readonly currency: string,
+    /** Recognises our stored images so their rows get storage key, size and type. */
+    private readonly storedImages: StoredImages = NO_STORED_IMAGES,
   ) {}
 
   async importFile(file: UploadedFile | undefined, merchantId: string, options: ImportOptions = {}): Promise<CatalogImportReport> {
@@ -269,7 +272,7 @@ export class CatalogImportService {
         await assignSlugs(tx, results);
         if (!writable() || options.dryRun) return [0, 0];
         const actor = `${options.actor ?? ''}`.trim() || null;
-        return save(tx, results.filter((r) => r.valid), parents, merchantId, actor, fileName, options.keepStock ?? false);
+        return save(tx, results.filter((r) => r.valid), parents, merchantId, actor, fileName, options.keepStock ?? false, this.storedImages);
       }, TX.catalogImport);
     }
     // Nothing was written when an atomic import has an invalid row.
@@ -810,6 +813,7 @@ async function save(
   actor: string | null,
   fileName: string,
   keepStock: boolean,
+  storedImages: StoredImages,
 ): Promise<[number, number]> {
   if (!valid.length) return [0, 0];
   const parentIds = new Map(knownParents);
@@ -855,7 +859,7 @@ async function save(
   const reason = `Catalog import ${fileName}`.slice(0, 500);
   const addImages = (r: RowResult, productId: string) => {
     const altText = (r.variantName ? `${r.name} – ${r.variantName}` : r.name!).slice(0, 255);
-    r.imageUrls.forEach((url, i) => images.push({ productId, url, altText, position: i, isPrimary: i === 0 }));
+    r.imageUrls.forEach((url, i) => images.push({ productId, url, altText, position: i, isPrimary: i === 0, ...storedImages.describe(url) }));
   };
 
   for (const r of valid) {
@@ -897,7 +901,10 @@ async function save(
 
   if (products.length) await tx.product.createMany({ data: products });
   if (replaceImagesOf.length) await tx.productImage.deleteMany({ where: { productId: { in: replaceImagesOf } } });
-  if (images.length) await tx.productImage.createMany({ data: images });
+  if (images.length) {
+    await tx.productImage.createMany({ data: images });
+    await storedImages.fillFromUploads(tx, [...new Set(images.map((i) => i.productId))]);
+  }
   if (movements.length) await tx.stockMovement.createMany({ data: movements });
   return [newParents.length, toUpdate.length];
 }

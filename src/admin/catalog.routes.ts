@@ -171,5 +171,13 @@ export function adminCatalogRoutes(c: Container): Router {
     const result = await svc.recheckImages(scope);
     res.json(ok(result, result.enabled ? `Checked ${result.checked} image(s), ${result.broken} broken` : 'Image checks are switched off'));
   });
+  /** Removes uploaded image files nothing refers to any more; ?dryRun=true only lists them. Also run daily by cron. */
+  r.post('/images/cleanup', ...staff, async (req, res) => {
+    const dryRun = query(req, 'dryRun') === 'true';
+    const result = await c.imageUploads.cleanup({ dryRun });
+    res.json(
+      ok(result, dryRun ? `${result.storageKeys.length} unused image file(s) would be removed` : `Removed ${result.removed} unused image file(s)`),
+    );
+  });
   return r;
 }

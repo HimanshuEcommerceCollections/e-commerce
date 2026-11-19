@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { harness } from './support/harness';
 
 /** FR-IM-08: image URLs are checked; a broken image is flagged, the product still imports. */
-const { prisma, container } = harness({ env: { IMAGE_CHECKS_ENABLED: 'true', IMAGE_CHECK_TIMEOUT_MS: '500' } });
+const { prisma, container } = harness({ imageChecks: { enabled: true, timeoutMs: 500 } });
 
 let server: Server;
 let base: string;

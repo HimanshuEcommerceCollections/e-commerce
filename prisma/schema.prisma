@@ -1042,3 +1042,22 @@ model AuditEvent {
   @@index([sellerId, createdAt], map: "idx_audit_events_seller")
   @@map("audit_events")
 }
+
+/// A file uploaded to object storage (product images). product_images rows
+/// take their file size from here; a file nothing refers to any more is removed
+/// by the cleanup job after IMAGE_ORPHAN_GRACE_DAYS, and deletedAt is set.
+model ImageUpload {
+  id            String    @id @default(uuid()) @db.Uuid
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  storageKey    String    @unique(map: "uk_image_uploads_storage_key") @map("storage_key") @db.VarChar(512)
+  url           String    @db.VarChar(2048)
+  contentType   String    @map("content_type") @db.VarChar(100)
+  width         Int
+  height        Int
+  fileSizeBytes BigInt    @map("file_size_bytes")
+  uploadedBy    String?   @map("uploaded_by") @db.Uuid
+  deletedAt     DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  @@index([createdAt], map: "idx_image_uploads_created_at")
+  @@map("image_uploads")
+}

@@ -46,6 +46,22 @@ app.get('/internal/cron/expire-pending', async (req, res) => {
   }
 });
 
+// Daily: removes uploaded image files nothing refers to any more.
+app.get('/internal/cron/image-cleanup', async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (!secret || req.headers.authorization !== `Bearer ${secret}`) {
+    res.status(401).json({ success: false, message: 'Unauthorized' });
+    return;
+  }
+  try {
+    const { removed } = await container.imageUploads.cleanup();
+    res.json({ success: true, removed });
+  } catch (e) {
+    log.error('Image cleanup failed', e);
+    res.status(500).json({ success: false, message: 'Image cleanup failed' });
+  }
+});
+
 app.use(api);
 
 export default app;

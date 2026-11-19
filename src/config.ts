@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { z } from 'zod';
 
 /**
@@ -73,6 +74,28 @@ const dayRange = (def: string) =>
       }
       return { minDays, maxDays };
     });
+
+const MB = 1024 * 1024;
+
+/** Image URL checks (FR-IM-08), fixed in code. Tests switch them via the harness. */
+const IMAGE_CHECKS = { enabled: true, timeoutMs: 5000 } as const;
+
+/**
+ * Product image file settings, fixed in code (only the Blob token is read from
+ * the environment). Moving to Cloudflare R2: copy the files keeping their keys,
+ * add the R2 provider, and set publicBaseUrl to the domain serving them.
+ */
+const IMAGE_FILES = {
+  /** Domain in front of the store (e.g. https://images.example.com); empty = the provider's own URL. */
+  publicBaseUrl: '',
+  /** Vercel functions accept request bodies up to 4.5 MB, so uploads stay under that. */
+  maxFileSizeBytes: 4 * MB,
+  /** Images copied from a link are downloaded by the server: no request body limit. */
+  fetchMaxFileSizeBytes: 15 * MB,
+  fetchTimeoutMs: 15_000,
+  /** Uploaded files nothing refers to are removed after this many days (cleanup job). */
+  orphanGraceDays: 7,
+} as const;
 
 const EnvSchema = z.object({
   SERVER_PORT: int(8080),
@@ -151,10 +174,10 @@ const EnvSchema = z.object({
   SMTP_PASS: z.string().default(''),
   // From header; defaults to "STORE_NAME <SMTP_USER>".
   MAIL_FROM: z.string().default(''),
-  IMAGE_CHECKS_ENABLED: bool(true),
-  IMAGE_CHECK_TIMEOUT_MS: int(5000),
-  // Host that image checks use for localhost URLs (Docker: host.docker.internal).
-  IMAGE_CHECK_LOCALHOST_ALIAS: z.string().default(''),
+  // Product image uploads go to Vercel Blob when this is set (Vercel adds it
+  // when a Blob store is connected); unset, only image links work. The other
+  // image file settings are fixed in IMAGE_FILES below.
+  BLOB_READ_WRITE_TOKEN: z.string().default(''),
   PASSWORD_RESET_TTL_MINUTES: int(60),
   // ── Review queue automatic checks ──
   // Comma-separated brands sellers may not list (case-insensitive); empty = none.
@@ -223,6 +246,12 @@ export interface Config {
   reviews: { autoPublish: boolean };
   mail: import('./notify/mailer').MailConfig;
   imageChecks: { enabled: boolean; timeoutMs: number; localhostAlias: string };
+  imageStorage: import('./storage/object-storage').StorageSettings & {
+    maxFileSizeBytes: number;
+    fetchMaxFileSizeBytes: number;
+    fetchTimeoutMs: number;
+    orphanGraceDays: number;
+  };
   passwordReset: { ttlMinutes: number };
   /** Review queue automatic checks. */
   reviewChecks: { restrictedBrands: string[]; marginFloorPercent: number; bigPriceChangePercent: number };
@@ -319,9 +348,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       },
     },
     imageChecks: {
-      enabled: e.IMAGE_CHECKS_ENABLED,
-      timeoutMs: e.IMAGE_CHECK_TIMEOUT_MS,
-      localhostAlias: e.IMAGE_CHECK_LOCALHOST_ALIAS.trim(),
+      ...IMAGE_CHECKS,
+      // Inside a container localhost is the container, not the machine serving
+      // the images; Docker reaches the host as host.docker.internal.
+      localhostAlias: existsSync('/.dockerenv') ? 'host.docker.internal' : '',
+    },
+    imageStorage: {
+      ...IMAGE_FILES,
+      provider: e.BLOB_READ_WRITE_TOKEN ? 'vercel-blob' : 'none',
+      blobToken: e.BLOB_READ_WRITE_TOKEN,
     },
     passwordReset: { ttlMinutes: e.PASSWORD_RESET_TTL_MINUTES },
     reviewChecks: {
