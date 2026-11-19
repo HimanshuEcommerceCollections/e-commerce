@@ -3,7 +3,11 @@ import multer from 'multer';
 import { currentUser, requireAuth, requireRole } from '../auth/auth.middleware';
 import { ok } from '../common/api-response';
 import { DomainError, SellerReviewRequiredError } from '../common/errors';
-import { ValidationError } from '../common/validation';
+import { ValidationError, parseBody, requiredString } from '../common/validation';
+import { uploadsNotConfigured } from '../storage/object-storage';
+import { z } from 'zod';
+
+const FromUrlSchema = z.object({ url: requiredString({ max: 2048 }) });
 import type { Container } from '../container';
 import { CATALOG_ROLES } from '../routes';
 import { templateCsv } from './importer/template';
@@ -80,6 +84,38 @@ export function catalogRoutes(c: Container): Router {
       details: { columns: report.columns, totalRows: report.totalRows, updatedRows: report.updatedRows, errors: report.errors.slice(0, 50) },
     });
     res.json(ok(report, `Updated ${report.updatedRows} of ${report.totalRows} rows`));
+  });
+
+  // ── Product image files ──
+  // Sellers and catalog staff store image files with us instead of linking to
+  // their own hosting; the returned URL goes wherever an image link goes
+  // (forms, imports, POST /api/products), and its rows get storage key and size.
+  const imageUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: c.config.imageStorage.maxFileSizeBytes, files: 1 },
+  });
+  const uploadsOn: express.RequestHandler = (_req, _res, next) => {
+    if (!c.imageUploads.enabled) throw uploadsNotConfigured();
+    next();
+  };
+
+  r.get('/images/config', ...anyCatalogUser, (_req, res) => {
+    res.json(
+      ok({
+        enabled: c.imageUploads.enabled,
+        maxFileSizeBytes: c.config.imageStorage.maxFileSizeBytes,
+        contentTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+      }),
+    );
+  });
+
+  r.post('/images', ...anyCatalogUser, uploadsOn, multipart, imageUpload.single('file'), async (req, res) => {
+    res.status(201).json(ok(await c.imageUploads.store(fileOf(req).buffer, currentUser(req).id), 'Image uploaded'));
+  });
+
+  r.post('/images/from-url', ...anyCatalogUser, uploadsOn, async (req, res) => {
+    const { url } = parseBody(FromUrlSchema, req.body);
+    res.status(201).json(ok(await c.imageUploads.storeFromUrl(url, currentUser(req).id), 'Image copied'));
   });
 
   r.get('/export', ...staffOnly, async (req, res) => {

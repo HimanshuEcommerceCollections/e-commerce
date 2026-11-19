@@ -39,6 +39,8 @@ import { CatalogImportService } from './product/importer/import.service';
 import { CatalogBulkUpdateService } from './product/importer/bulk-update.service';
 import { CatalogExportService } from './product/importer/export.service';
 import { ImageCheckService } from './product/image-check';
+import { ImageUploadService } from './product/image-upload.service';
+import { createObjectStorage, type ObjectStorage } from './storage/object-storage';
 import { pricingRules } from './order/pricing';
 import { ProductService } from './product/product.service';
 import { SellerSubmissionService } from './seller/submission.service';
@@ -79,6 +81,8 @@ export interface Container {
   catalogUpdates: CatalogBulkUpdateService;
   /** Catalog export in the template's columns (NFR-06). */
   catalogExport: CatalogExportService;
+  /** Product image files: upload, copy from a link, and metadata for stored URLs. */
+  imageUploads: ImageUploadService;
   /** Image URL checks (FR-IM-08). */
   imageChecks: ImageCheckService;
   /** Admin catalog: products, variants, inventory, images (FR-AD-01/03/05). */
@@ -144,7 +148,7 @@ export interface Container {
 export function createContainer(
   config: Config,
   prisma: PrismaClient,
-  overrides: { gateway?: PaymentGateway } = {},
+  overrides: { gateway?: PaymentGateway; storage?: ObjectStorage } = {},
 ): Container {
   const stripe = config.payment.provider === 'stripe';
   if (stripe) StripeWebhookService.requireRealSecret(config.payment.stripe.webhookSecret);
@@ -167,7 +171,8 @@ export function createContainer(
   const shipping: ShippingProvider = new ManualShippingProvider();
   const catalogReader = new CatalogFileReader(config.catalogImport.maxRows);
   const imageChecks = new ImageCheckService(prisma, config.imageChecks);
-  const catalogImport = new CatalogImportService(prisma, catalogReader, imageChecks, config.order.currency);
+  const imageUploads = new ImageUploadService(prisma, overrides.storage ?? createObjectStorage(config.imageStorage), config.imageStorage);
+  const catalogImport = new CatalogImportService(prisma, catalogReader, imageChecks, config.order.currency, imageUploads);
   const catalogExport = new CatalogExportService(prisma, config.order.currency);
   const promotions = new PromotionService(prisma);
   const cart = new CartService(prisma, pricingRules(config), config.order.currency, promotions);
@@ -189,13 +194,14 @@ export function createContainer(
     support: new SupportService(prisma, mailer, config),
     analytics,
     categories: new CategoryService(prisma),
-    products: new ProductService(prisma),
+    products: new ProductService(prisma, imageUploads),
     promotions,
     storefront: new StorefrontService(prisma, config.inventory.lowStockThreshold),
     catalogImport,
     catalogUpdates: new CatalogBulkUpdateService(prisma, catalogReader),
     catalogExport,
     imageChecks,
+    imageUploads,
     catalogAdmin,
     submissions,
     reviewQueue: new ReviewQueueService(prisma, catalogExport, submissions, audit, config.reviewChecks),

@@ -20,6 +20,7 @@ import {
   requiredString,
 } from '../common/validation';
 import { TX, type Db } from '../db';
+import { NO_STORED_IMAGES, type DescribeImage, type StoredImages } from './image-upload.service';
 import {
   PRODUCT_INCLUDE,
   toDetailResponse,
@@ -95,7 +96,13 @@ type ImageInput = z.output<typeof ImageSchema>;
 export const PRODUCT_SORTS = ['createdAt', 'updatedAt', 'name', 'price', 'stockQuantity', 'sku', 'status'] as const;
 
 export class ProductService {
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(
+    private readonly prisma: PrismaClient,
+    /** Recognises our stored images so their rows get storage key, size and type. */
+    private readonly storedImages: StoredImages = NO_STORED_IMAGES,
+  ) {}
+
+  private readonly describe: DescribeImage = (url) => this.storedImages.describe(url);
 
   create(input: z.output<typeof ProductCreateSchema>, merchantId: string) {
     return this.prisma.$transaction(async (tx) => {
@@ -125,10 +132,11 @@ export class ProductService {
           style: input.style ?? null,
           merchantId,
           version: 0n,
-          images: { create: imageRows(input.images) },
+          images: { create: imageRows(input.images, this.describe) },
         },
         include: PRODUCT_INCLUDE,
       });
+      await this.storedImages.fillFromUploads(tx, [product.id]);
       return toDetail(tx, product, true);
     }, TX.default);
   }
@@ -167,7 +175,8 @@ export class ProductService {
       if (input.images) {
         // Full replacement of the gallery, in the given order.
         await tx.productImage.deleteMany({ where: { productId } });
-        await tx.productImage.createMany({ data: imageRows(input.images).map((i) => ({ ...i, productId })) });
+        await tx.productImage.createMany({ data: imageRows(input.images, this.describe).map((i) => ({ ...i, productId })) });
+        await this.storedImages.fillFromUploads(tx, [productId]);
       }
 
       // Optimistic lock on the version read above (was JPA @Version).
@@ -342,18 +351,22 @@ async function resolveOrCreateParent(
  * Gallery rows in request order (position = index). Exactly one is primary:
  * the first flagged one, or else the first image.
  */
-function imageRows(requested: ImageInput[] | null | undefined) {
+function imageRows(requested: ImageInput[] | null | undefined, describe: DescribeImage) {
   if (!requested?.length) return [];
   const primaryIndex = Math.max(0, requested.findIndex((i) => i.primary));
-  return requested.map((img, i) => ({
-    url: img.url,
-    altText: img.altText ?? null,
-    position: i,
-    isPrimary: i === primaryIndex,
-    width: img.width ?? null,
-    height: img.height ?? null,
-    contentType: img.contentType ?? null,
-    fileSizeBytes: img.fileSizeBytes === undefined ? null : BigInt(img.fileSizeBytes),
-    storageKey: img.storageKey ?? null,
-  }));
+  return requested.map((img, i) => {
+    // The storage key is ours to say: it comes from the URL, never from the client.
+    const stored = describe(img.url);
+    return {
+      url: img.url,
+      altText: img.altText ?? null,
+      position: i,
+      isPrimary: i === primaryIndex,
+      width: stored?.width ?? img.width ?? null,
+      height: stored?.height ?? img.height ?? null,
+      contentType: stored?.contentType ?? img.contentType ?? null,
+      fileSizeBytes: img.fileSizeBytes === undefined ? null : BigInt(img.fileSizeBytes),
+      storageKey: stored?.storageKey ?? null,
+    };
+  });
 }
