@@ -55,6 +55,7 @@ import { IntegrationService } from './integrations/integration.service';
 import { SecretBox } from './integrations/secret-box';
 import { GootenService } from './vendor/gooten/gooten.service';
 import { SupplierOnboardingService } from './supplier/onboarding.service';
+import { SellerOrderService } from './seller/seller-orders.service';
 
 /** Every service, wired once. Tests build one with a scripted gateway. */
 export interface Container {
@@ -143,6 +144,8 @@ export interface Container {
   gooten: GootenService;
   /** Supplier onboarding: applications, screening, scorecard, documents, approval and suspension. */
   supplierOnboarding: SupplierOnboardingService;
+  /** Sellers' orders: ship, cancel, returns, earnings and weekly payouts. */
+  sellerOrders: SellerOrderService;
 }
 
 export function createContainer(
@@ -181,6 +184,8 @@ export function createContainer(
   const catalogAdmin = new CatalogAdminService(prisma, catalogImport, imageChecks, config.inventory.lowStockThreshold);
   const integrations = new IntegrationService(prisma, new SecretBox(config.integrations.encryptionKey), config.integrations.timeoutMs);
   const audit = new AuditService(prisma);
+  const adminOrders = new AdminOrderService(prisma, gateway, orders, shipping, mailer, config);
+  const adminReturns = new AdminReturnService(prisma, gateway, mailer, config);
   const submissions = new SellerSubmissionService(prisma, catalogReader, catalogImport, catalogExport, imageChecks, mailer, config, audit);
 
   return {
@@ -213,8 +218,9 @@ export function createContainer(
     customerReturns,
     buyAgain: new BuyAgainService(prisma),
     reviews: new ReviewService(prisma, config, mailer),
-    adminOrders: new AdminOrderService(prisma, gateway, orders, shipping, mailer, config),
-    adminReturns: new AdminReturnService(prisma, gateway, mailer, config),
+    adminOrders,
+    adminReturns,
+    sellerOrders: new SellerOrderService(prisma, adminOrders, adminReturns),
     adminCustomers: new AdminCustomerService(prisma),
     adminInbox: new AdminInboxService(prisma),
     adminPromotions: new AdminPromotionService(prisma),

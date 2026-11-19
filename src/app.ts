@@ -11,6 +11,7 @@ import { adminAuditRoutes } from './audit/audit.routes';
 import { adminOpsRoutes } from './admin/ops.routes';
 import { adminInboxRoutes } from './admin/inbox.routes';
 import { adminPromotionRoutes } from './admin/promotions.routes';
+import { adminPayoutRoutes } from './admin/payouts.routes';
 import { adminReviewRoutes } from './admin/reviews.routes';
 import { adminGiftCardRoutes } from './admin/gift-cards.routes';
 import { accountShoppingRoutes, productReviewRoutes, reviewRoutes } from './account/account-shopping.routes';
@@ -95,6 +96,7 @@ export function createApp(c: Container): Express {
   app.use('/api/admin', adminInboxRoutes(c));
   app.use('/api/admin', adminSupplierRoutes(c));
   app.use('/api/admin', adminPromotionRoutes(c));
+  app.use('/api/admin', adminPayoutRoutes(c));
   app.use('/api/admin', adminReviewRoutes(c));
   app.use('/api/admin', adminGiftCardRoutes(c));
   app.use('/api/admin', adminCatalogRoutes(c));

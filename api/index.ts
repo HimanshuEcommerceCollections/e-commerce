@@ -62,6 +62,22 @@ app.get('/internal/cron/image-cleanup', async (req, res) => {
   }
 });
 
+// Fridays: closes last week's delivered orders into seller payouts.
+app.get('/internal/cron/close-payouts', async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (!secret || req.headers.authorization !== `Bearer ${secret}`) {
+    res.status(401).json({ success: false, message: 'Unauthorized' });
+    return;
+  }
+  try {
+    const { payouts } = await container.sellerOrders.closeWeek();
+    res.json({ success: true, payouts });
+  } catch (e) {
+    log.error('Closing seller payouts failed', e);
+    res.status(500).json({ success: false, message: 'Closing payouts failed' });
+  }
+});
+
 app.use(api);
 
 export default app;

@@ -99,6 +99,17 @@ const IMAGE_FILES = {
   orphanGraceDays: 7,
 } as const;
 
+/**
+ * Seller orders and payouts, fixed in code. The commission rate is the
+ * design's placeholder (designs/seller/seller-orders.html): change it here.
+ */
+export const SELLER_PAYOUTS = {
+  /** Marketplace commission on what the customer keeps, as a fraction. */
+  commissionRate: 0.15,
+  /** Sellers ship within this long after the order is paid. */
+  shipWithinHours: 48,
+} as const;
+
 const EnvSchema = z.object({
   SERVER_PORT: int(8080),
   // A full DATABASE_URL wins; otherwise it is assembled from the DB_* parts.
