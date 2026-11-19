@@ -64,6 +64,7 @@ model User {
   dataExports         DataExportRequest[]
   sellerApplication   SellerApplication?
   sellerDocuments     SellerDocument[]
+  sellerPayouts       SellerPayout[]
 
   @@map("users")
 }
@@ -327,6 +328,7 @@ model Order {
   returns       OrderReturn[]
   notifications Notification[]
   vendorOrders  VendorOrder[]
+  payoutItems   SellerPayoutItem[]
 
   @@index([userId, deleted], map: "idx_orders_user_id")
   @@index([customerEmail], map: "idx_orders_customer_email")
@@ -1060,4 +1062,51 @@ model ImageUpload {
 
   @@index([createdAt], map: "idx_image_uploads_created_at")
   @@map("image_uploads")
+}
+
+/// One seller's payout: the delivered orders of a week (no return open),
+/// closed each Friday. SCHEDULED until the payments team sends it, then PAID.
+model SellerPayout {
+  id           String             @id @default(uuid()) @db.Uuid
+  createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+  reference    String             @unique(map: "uk_seller_payouts_reference") @db.VarChar(20)
+  merchantId   String             @map("merchant_id") @db.Uuid
+  periodFrom   DateTime           @map("period_from") @db.Timestamptz(6)
+  periodTo     DateTime           @map("period_to") @db.Timestamptz(6)
+  scheduledFor DateTime           @map("scheduled_for") @db.Date
+  /// SCHEDULED | PAID
+  status       String             @db.VarChar(20)
+  orders       Int
+  sales        Decimal            @db.Decimal(12, 2)
+  commission   Decimal            @db.Decimal(12, 2)
+  refunds      Decimal            @db.Decimal(12, 2)
+  net          Decimal            @db.Decimal(12, 2)
+  paidAt       DateTime?          @map("paid_at") @db.Timestamptz(6)
+  paidBy       String?            @map("paid_by") @db.VarChar(255)
+  merchant     User               @relation(fields: [merchantId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_seller_payouts_merchant")
+  items        SellerPayoutItem[]
+
+  @@index([merchantId, scheduledFor], map: "idx_seller_payouts_merchant")
+  @@index([status, scheduledFor], map: "idx_seller_payouts_status")
+  @@map("seller_payouts")
+}
+
+/// One order's share in a seller payout (each order is paid out once per seller).
+model SellerPayoutItem {
+  id          String       @id @default(uuid()) @db.Uuid
+  payoutId    String       @map("payout_id") @db.Uuid
+  merchantId  String       @map("merchant_id") @db.Uuid
+  orderId     String       @map("order_id") @db.Uuid
+  deliveredAt DateTime     @map("delivered_at") @db.Timestamptz(6)
+  sales       Decimal      @db.Decimal(12, 2)
+  commission  Decimal      @db.Decimal(12, 2)
+  refunds     Decimal      @db.Decimal(12, 2)
+  net         Decimal      @db.Decimal(12, 2)
+  payout      SellerPayout @relation(fields: [payoutId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_seller_payout_items_payout")
+  order       Order        @relation(fields: [orderId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_seller_payout_items_order")
+
+  @@unique([merchantId, orderId], map: "uk_seller_payout_items_merchant_order")
+  @@index([payoutId], map: "idx_seller_payout_items_payout")
+  @@map("seller_payout_items")
 }
