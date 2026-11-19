@@ -6,6 +6,7 @@ import { afterAll, inject } from 'vitest';
 import { createApp } from '../../src/app';
 import { loadConfig, type Config } from '../../src/config';
 import { createContainer, type Container } from '../../src/container';
+import type { ObjectStorage } from '../../src/storage/object-storage';
 import type { UserRole } from '../../src/common/enums';
 import type { PaymentGateway } from '../../src/payment/gateway';
 
@@ -22,7 +23,7 @@ export interface Harness {
  * rate limiting off unless the env says otherwise. Call at the top of a test
  * file; the client disconnects after the file.
  */
-export function harness(options: { gateway?: PaymentGateway; env?: Record<string, string> } = {}): Harness {
+export function harness(options: { gateway?: PaymentGateway; storage?: ObjectStorage; env?: Record<string, string> } = {}): Harness {
   const config = loadConfig({
     DATABASE_URL: inject('databaseUrl'),
     JWT_SECRET: 'test-only-secret-test-only-secret-0123456789',
@@ -34,7 +35,7 @@ export function harness(options: { gateway?: PaymentGateway; env?: Record<string
     ...options.env,
   });
   const prisma = new PrismaClient({ datasourceUrl: config.databaseUrl });
-  const container = createContainer(config, prisma, { gateway: options.gateway });
+  const container = createContainer(config, prisma, { gateway: options.gateway, storage: options.storage });
   const app = createApp(container);
   afterAll(() => prisma.$disconnect());
   return { config, prisma, container, app, fixtures: fixtures(prisma, container, app) };
