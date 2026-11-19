@@ -105,7 +105,7 @@ const ProductVariantCreate = z.object({
   imageUrls: z
     .array(z.string().url('must be a valid URL').max(2048), { required_error: 'must not be null', invalid_type_error: 'must be an array' })
     .min(1, 'must have at least one image URL')
-    .max(5, 'size must be between 1 and 5'),
+    .max(IMAGE_COLUMNS.length, `size must be between 1 and ${IMAGE_COLUMNS.length}`),
 });
 
 export const ProductCreateSchema = z.object({

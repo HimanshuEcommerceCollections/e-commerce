@@ -8,6 +8,13 @@ import { uploadsNotConfigured } from '../storage/object-storage';
 import { z } from 'zod';
 
 const FromUrlSchema = z.object({ url: requiredString({ max: 2048 }) });
+const DirectUploadSchema = z.object({
+  contentType: requiredString({ max: 100 }),
+  fileSizeBytes: z.number({ invalid_type_error: 'must be a number' }).int().positive(),
+  width: z.number({ invalid_type_error: 'must be a number' }).int().min(1).max(20_000),
+  height: z.number({ invalid_type_error: 'must be a number' }).int().min(1).max(20_000),
+});
+const DirectCompleteSchema = z.object({ storageKey: requiredString({ max: 512 }) });
 import type { Container } from '../container';
 import { CATALOG_ROLES } from '../routes';
 import { templateCsv } from './importer/template';
@@ -104,9 +111,23 @@ export function catalogRoutes(c: Container): Router {
       ok({
         enabled: c.imageUploads.enabled,
         maxFileSizeBytes: c.config.imageStorage.maxFileSizeBytes,
+        // Browsers upload straight to storage when this is set (larger files; see /images/direct).
+        directMaxFileSizeBytes: c.imageUploads.directMaxFileSizeBytes,
         contentTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
       }),
     );
+  });
+
+  /** Starts a browser-to-storage upload: returns the path and a short-lived token for that one file. */
+  r.post('/images/direct', ...anyCatalogUser, uploadsOn, async (req, res) => {
+    const file = parseBody(DirectUploadSchema, req.body);
+    res.status(201).json(ok(await c.imageUploads.startDirectUpload(file, currentUser(req).id), 'Upload started'));
+  });
+
+  /** Checks a finished direct upload and returns the stored image. */
+  r.post('/images/direct/complete', ...anyCatalogUser, uploadsOn, async (req, res) => {
+    const { storageKey } = parseBody(DirectCompleteSchema, req.body);
+    res.json(ok(await c.imageUploads.finishDirectUpload(storageKey, currentUser(req).id), 'Image uploaded'));
   });
 
   r.post('/images', ...anyCatalogUser, uploadsOn, multipart, imageUpload.single('file'), async (req, res) => {

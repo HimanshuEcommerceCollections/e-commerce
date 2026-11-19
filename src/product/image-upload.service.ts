@@ -3,7 +3,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { imageSize } from 'image-size';
 import { OPEN_SUBMISSION_STATUSES } from '../common/enums';
 import { DomainError } from '../common/errors';
-import { uploadsNotConfigured, type ObjectStorage } from '../storage/object-storage';
+import { uploadsNotConfigured, type DirectUploadTarget, type ObjectStorage } from '../storage/object-storage';
 
 /** Formats we store, by image-size's type name. SVG is left out on purpose: it can carry scripts. */
 const FORMATS: Record<string, { ext: string; contentType: string }> = {
@@ -41,6 +41,8 @@ export interface ImageMeta {
 export interface ImageUploadSettings {
   /** Largest file accepted in an upload request. */
   maxFileSizeBytes: number;
+  /** Largest file a browser may upload straight to storage. */
+  directMaxFileSizeBytes: number;
   /** Largest file copied from a link. */
   fetchMaxFileSizeBytes: number;
   fetchTimeoutMs: number;
@@ -68,14 +70,17 @@ export class ImageUploadService {
     return this.storage.provider;
   }
 
+  /** Largest file a browser may upload straight to storage; null when the provider can't take direct uploads. */
+  get directMaxFileSizeBytes(): number | null {
+    return this.storage.directUpload ? this.settings.directMaxFileSizeBytes : null;
+  }
+
   /** Validates and stores one image file, and records the upload. */
-  async store(body: Buffer, uploadedBy: string | null = null): Promise<StoredImage> {
+  async store(body: Buffer, uploadedBy: string | null = null, maxBytes = this.settings.maxFileSizeBytes): Promise<StoredImage> {
     if (!body.length) throw new DomainError(400, 'The image file is empty');
-    if (body.length > this.settings.maxFileSizeBytes) throw tooLarge(this.settings.maxFileSizeBytes);
+    if (body.length > maxBytes) throw tooLarge(maxBytes);
     const { width, height, format } = inspect(body);
-    const now = new Date();
-    const month = `${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-    const storageKey = `products/${month}/${randomUUID()}-${width}x${height}.${format.ext}`;
+    const storageKey = newKey(width, height, format.ext);
     const url = await this.storage.put(storageKey, body, format.contentType);
     const image = { url, storageKey, width, height, contentType: format.contentType, fileSizeBytes: body.length };
     try {
@@ -86,6 +91,69 @@ export class ImageUploadService {
       throw e;
     }
     return image;
+  }
+
+  /**
+   * Starts a browser-to-storage upload of one photo (larger than an API
+   * request may carry). The browser reads the photo's size itself; the upload
+   * is recorded now, so one that is never finished is still cleaned up, and
+   * finishDirectUpload checks the stored file against what was declared.
+   */
+  async startDirectUpload(
+    file: { contentType: string; fileSizeBytes: number; width: number; height: number },
+    uploadedBy: string,
+  ): Promise<{ storageKey: string; url: string; maxFileSizeBytes: number } & DirectUploadTarget> {
+    const max = this.directMaxFileSizeBytes;
+    if (!this.enabled) throw uploadsNotConfigured();
+    if (max === null || !this.storage.directUpload) throw new DomainError(501, 'Direct uploads are not available on this server');
+    const format = Object.values(FORMATS).find((f) => f.contentType === file.contentType);
+    if (!format) throw unsupported();
+    if (file.fileSizeBytes > max) throw tooLarge(max);
+    const storageKey = newKey(file.width, file.height, format.ext);
+    const target = await this.storage.directUpload(storageKey, format.contentType, max);
+    const url = this.storage.urlFor(storageKey);
+    await this.prisma.imageUpload.create({
+      data: {
+        storageKey,
+        url,
+        contentType: format.contentType,
+        width: file.width,
+        height: file.height,
+        fileSizeBytes: BigInt(file.fileSizeBytes),
+        uploadedBy,
+      },
+    });
+    return { ...target, storageKey, url, maxFileSizeBytes: max };
+  }
+
+  /**
+   * Checks a finished direct upload: the stored file must be a supported image
+   * of the declared format and size. A file that isn't is removed. Only the
+   * user who started the upload can finish it.
+   */
+  async finishDirectUpload(storageKey: string, uploadedBy: string): Promise<StoredImage> {
+    const row = await this.prisma.imageUpload.findUnique({ where: { storageKey } });
+    if (!row || row.deletedAt || row.uploadedBy !== uploadedBy) throw new DomainError(404, 'Upload not found');
+    const body = await this.storage.get(storageKey);
+    if (!body) throw new DomainError(409, "The photo hasn't finished uploading");
+    const reject = async (error: DomainError) => {
+      await this.storage.delete([storageKey]).catch(() => undefined);
+      await this.prisma.imageUpload.update({ where: { id: row.id }, data: { deletedAt: new Date() } });
+      return error;
+    };
+    let actual: ReturnType<typeof inspect>;
+    try {
+      actual = inspect(body);
+    } catch (e) {
+      throw await reject(e as DomainError);
+    }
+    if (actual.format.contentType !== row.contentType || actual.width !== row.width || actual.height !== row.height) {
+      throw await reject(new DomainError(400, "The uploaded photo doesn't match what was declared; upload it again"));
+    }
+    if (Number(row.fileSizeBytes) !== body.length) {
+      await this.prisma.imageUpload.update({ where: { id: row.id }, data: { fileSizeBytes: BigInt(body.length) } });
+    }
+    return { url: row.url, storageKey, width: row.width, height: row.height, contentType: row.contentType, fileSizeBytes: body.length };
   }
 
   /**
@@ -111,7 +179,7 @@ export class ImageUploadService {
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
       throw new DomainError(400, 'Enter a full image link starting with https://');
     }
-    return this.store(await this.download(parsed), uploadedBy);
+    return this.store(await this.download(parsed), uploadedBy, this.settings.fetchMaxFileSizeBytes);
   }
 
   /**
@@ -256,3 +324,10 @@ export type StoredImages = Pick<ImageUploadService, 'describe' | 'fillFromUpload
 
 /** For services built without storage (tests, scripts): no URL is ours. */
 export const NO_STORED_IMAGES: StoredImages = { describe: () => null, fillFromUploads: async () => undefined };
+
+/** `products/<yyyy>/<mm>/<uuid>-<w>x<h>.<ext>`: provider-neutral, and the size travels with the URL. */
+function newKey(width: number, height: number, ext: string): string {
+  const now = new Date();
+  const month = `${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  return `products/${month}/${randomUUID()}-${width}x${height}.${ext}`;
+}
