@@ -155,6 +155,20 @@ const EnvSchema = z.object({
   IMAGE_CHECK_TIMEOUT_MS: int(5000),
   // Host that image checks use for localhost URLs (Docker: host.docker.internal).
   IMAGE_CHECK_LOCALHOST_ALIAS: z.string().default(''),
+  // ── Product image files ──
+  // Where uploaded images are stored. Unset: vercel-blob when BLOB_READ_WRITE_TOKEN
+  // is set (Vercel adds it when a Blob store is connected), else none (links only).
+  IMAGE_STORAGE_PROVIDER: z.enum(['none', 'vercel-blob']).optional(),
+  BLOB_READ_WRITE_TOKEN: z.string().default(''),
+  // Custom domain serving the stored files (e.g. https://images.example.com); empty = the provider's URL.
+  IMAGE_PUBLIC_BASE_URL: z.string().url().optional(),
+  // Vercel functions accept request bodies up to 4.5 MB, so uploads stay under that.
+  IMAGE_UPLOAD_MAX_FILE_SIZE: dataSize('4MB'),
+  // Images copied from a link are downloaded by the server: no request body limit.
+  IMAGE_FETCH_MAX_FILE_SIZE: dataSize('15MB'),
+  IMAGE_FETCH_TIMEOUT_MS: int(15_000),
+  // Uploaded files nothing refers to are removed after this many days (cleanup job).
+  IMAGE_ORPHAN_GRACE_DAYS: int(7),
   PASSWORD_RESET_TTL_MINUTES: int(60),
   // ── Review queue automatic checks ──
   // Comma-separated brands sellers may not list (case-insensitive); empty = none.
@@ -223,6 +237,12 @@ export interface Config {
   reviews: { autoPublish: boolean };
   mail: import('./notify/mailer').MailConfig;
   imageChecks: { enabled: boolean; timeoutMs: number; localhostAlias: string };
+  imageStorage: import('./storage/object-storage').StorageSettings & {
+    maxFileSizeBytes: number;
+    fetchMaxFileSizeBytes: number;
+    fetchTimeoutMs: number;
+    orphanGraceDays: number;
+  };
   passwordReset: { ttlMinutes: number };
   /** Review queue automatic checks. */
   reviewChecks: { restrictedBrands: string[]; marginFloorPercent: number; bigPriceChangePercent: number };
@@ -253,6 +273,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const e = parsed.data;
   if (e.MAIL_PROVIDER === 'smtp' && (!e.SMTP_HOST || !e.SMTP_USER || !e.SMTP_PASS)) {
     throw new Error('Invalid configuration — MAIL_PROVIDER=smtp needs SMTP_HOST, SMTP_USER and SMTP_PASS');
+  }
+  const imageProvider = e.IMAGE_STORAGE_PROVIDER ?? (e.BLOB_READ_WRITE_TOKEN ? 'vercel-blob' : 'none');
+  if (imageProvider === 'vercel-blob' && !e.BLOB_READ_WRITE_TOKEN) {
+    throw new Error('Invalid configuration — IMAGE_STORAGE_PROVIDER=vercel-blob needs BLOB_READ_WRITE_TOKEN');
   }
 
   const databaseUrl =
@@ -322,6 +346,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       enabled: e.IMAGE_CHECKS_ENABLED,
       timeoutMs: e.IMAGE_CHECK_TIMEOUT_MS,
       localhostAlias: e.IMAGE_CHECK_LOCALHOST_ALIAS.trim(),
+    },
+    imageStorage: {
+      provider: imageProvider,
+      blobToken: e.BLOB_READ_WRITE_TOKEN,
+      publicBaseUrl: (e.IMAGE_PUBLIC_BASE_URL ?? '').replace(/\/+$/, ''),
+      maxFileSizeBytes: e.IMAGE_UPLOAD_MAX_FILE_SIZE,
+      fetchMaxFileSizeBytes: e.IMAGE_FETCH_MAX_FILE_SIZE,
+      fetchTimeoutMs: e.IMAGE_FETCH_TIMEOUT_MS,
+      orphanGraceDays: Math.max(1, e.IMAGE_ORPHAN_GRACE_DAYS),
     },
     passwordReset: { ttlMinutes: e.PASSWORD_RESET_TTL_MINUTES },
     reviewChecks: {
