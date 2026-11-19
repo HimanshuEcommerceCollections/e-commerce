@@ -20,6 +20,19 @@ class MemoryStorage implements ObjectStorage {
   keyOf(url: string) {
     return keyUnder(url, 'https://img.test.local');
   }
+  urlFor(key: string) {
+    return `https://img.test.local/${key}`;
+  }
+  async get(key: string) {
+    return this.objects.get(key)?.body ?? null;
+  }
+  /** Direct uploads: the test plays the browser and puts the file with `browserPut`. */
+  async directUpload(key: string) {
+    return { method: 'vercel-blob' as const, pathname: key, clientToken: `token-for-${key}` };
+  }
+  browserPut(key: string, body: Buffer, contentType: string) {
+    this.objects.set(key, { body, contentType });
+  }
 }
 
 /** The smallest buffer image-size reads as a PNG of this size: signature + IHDR. */
@@ -130,6 +143,67 @@ describe('product image uploads', () => {
     const row = await prisma.imageUpload.findUnique({ where: { storageKey: res.body.data.storageKey } });
     expect(row).toMatchObject({ url: res.body.data.url, width: 1100, height: 1100, contentType: 'image/png', fileSizeBytes: 33n, deletedAt: null });
     expect(row!.uploadedBy).not.toBeNull();
+  });
+});
+
+describe('direct (browser-to-storage) uploads', () => {
+  const start = (token: string, body: object) =>
+    request(app).post('/api/catalog/images/direct').set('Authorization', `Bearer ${token}`).send(body);
+  const complete = (token: string, storageKey: string) =>
+    request(app).post('/api/catalog/images/direct/complete').set('Authorization', `Bearer ${token}`).send({ storageKey });
+
+  it('issues a token for one path, then checks and records the uploaded file', async () => {
+    const seller = await fixtures.registerUser('ROLE_MERCHANT');
+    const cfg = await request(app).get('/api/catalog/images/config').set('Authorization', `Bearer ${seller}`);
+    expect(cfg.body.data.directMaxFileSizeBytes).toBe(10 * 1024 * 1024);
+
+    const body = png(3000, 2000);
+    const res = await start(seller, { contentType: 'image/png', fileSizeBytes: 6 * 1024 * 1024, width: 3000, height: 2000 });
+    expect(res.status).toBe(201);
+    const { storageKey, pathname, clientToken, url } = res.body.data;
+    expect(storageKey).toMatch(/-3000x2000\.png$/);
+    expect(pathname).toBe(storageKey);
+    expect(clientToken).toBe(`token-for-${storageKey}`);
+
+    // Not uploaded yet.
+    expect((await complete(seller, storageKey)).status).toBe(409);
+    storage.browserPut(storageKey, body, 'image/png');
+    const done = await complete(seller, storageKey);
+    expect(done.status).toBe(200);
+    expect(done.body.data).toMatchObject({ url, storageKey, width: 3000, height: 2000, contentType: 'image/png', fileSizeBytes: body.length });
+    expect((await prisma.imageUpload.findUnique({ where: { storageKey } }))!.fileSizeBytes).toBe(BigInt(body.length));
+
+    // Someone else can't finish it.
+    const other = await fixtures.registerUser('ROLE_MERCHANT');
+    expect((await complete(other, storageKey)).status).toBe(404);
+  });
+
+  it('refuses files over 10 MB and unsupported types, and removes a file that is not what was declared', async () => {
+    const seller = await fixtures.registerUser('ROLE_MERCHANT');
+    expect((await start(seller, { contentType: 'image/png', fileSizeBytes: 11 * 1024 * 1024, width: 10, height: 10 })).status).toBe(413);
+    expect((await start(seller, { contentType: 'image/svg+xml', fileSizeBytes: 100, width: 10, height: 10 })).status).toBe(415);
+
+    const res = await start(seller, { contentType: 'image/png', fileSizeBytes: 33, width: 1200, height: 1200 });
+    const { storageKey } = res.body.data;
+    storage.browserPut(storageKey, png(800, 800), 'image/png');
+    const done = await complete(seller, storageKey);
+    expect(done.status).toBe(400);
+    expect(storage.objects.has(storageKey)).toBe(false);
+    expect((await prisma.imageUpload.findUnique({ where: { storageKey } }))!.deletedAt).not.toBeNull();
+  });
+});
+
+describe('copying from a link', () => {
+  it('accepts images larger than the API upload limit', async () => {
+    const big = Buffer.concat([png(1500, 1500), Buffer.alloc(5 * 1024 * 1024)]);
+    const srv = createServer((_req, res) => res.writeHead(200, { 'Content-Type': 'image/png' }).end(big));
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve));
+    try {
+      const img = await container.imageUploads.storeFromUrl(`http://127.0.0.1:${(srv.address() as AddressInfo).port}/big.png`);
+      expect(img).toMatchObject({ width: 1500, fileSizeBytes: big.length });
+    } finally {
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
   });
 });
 

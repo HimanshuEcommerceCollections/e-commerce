@@ -90,6 +90,8 @@ const IMAGE_FILES = {
   publicBaseUrl: '',
   /** Vercel functions accept request bodies up to 4.5 MB, so uploads stay under that. */
   maxFileSizeBytes: 4 * MB,
+  /** Browsers upload photos straight to storage (not through the API), so they may be larger. */
+  directMaxFileSizeBytes: 10 * MB,
   /** Images copied from a link are downloaded by the server: no request body limit. */
   fetchMaxFileSizeBytes: 15 * MB,
   fetchTimeoutMs: 15_000,
@@ -248,6 +250,7 @@ export interface Config {
   imageChecks: { enabled: boolean; timeoutMs: number; localhostAlias: string };
   imageStorage: import('./storage/object-storage').StorageSettings & {
     maxFileSizeBytes: number;
+    directMaxFileSizeBytes: number;
     fetchMaxFileSizeBytes: number;
     fetchTimeoutMs: number;
     orphanGraceDays: number;

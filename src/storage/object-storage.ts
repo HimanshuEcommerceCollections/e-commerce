@@ -1,4 +1,5 @@
 import { del, put } from '@vercel/blob';
+import { generateClientTokenFromReadWriteToken } from '@vercel/blob/client';
 import { DomainError } from '../common/errors';
 
 /**
@@ -17,7 +18,27 @@ export interface ObjectStorage {
   delete(keys: string[]): Promise<void>;
   /** The key behind one of this store's public URLs, or null for any other URL. */
   keyOf(url: string): string | null;
+  /** The public URL an object stored under `key` has (or will have). */
+  urlFor(key: string): string;
+  /** An object's bytes, or null when there is none under `key`. */
+  get(key: string): Promise<Buffer | null>;
+  /**
+   * Lets a browser upload one object straight to the store, past the API's
+   * request size limit. Absent when the provider can't.
+   */
+  directUpload?(key: string, contentType: string, maxBytes: number): Promise<DirectUploadTarget>;
 }
+
+/** What a browser needs to upload one file straight to the store. */
+export interface DirectUploadTarget {
+  /** How the browser uploads: with @vercel/blob/client's put() and this token. */
+  method: 'vercel-blob';
+  pathname: string;
+  clientToken: string;
+}
+
+/** A direct-upload token is good for this long. */
+const DIRECT_UPLOAD_TTL_MS = 15 * 60 * 1000;
 
 export interface StorageSettings {
   provider: 'none' | 'vercel-blob';
@@ -56,6 +77,36 @@ export class VercelBlobStorage implements ObjectStorage {
     await del(keys, { token: this.token });
   }
 
+  /** The store id is the token's fourth part (vercel_blob_rw_<storeId>_<secret>); its URL host is that, lowercased. */
+  urlFor(key: string): string {
+    if (this.publicBaseUrl) return `${this.publicBaseUrl}/${key}`;
+    const storeId = this.token.split('_')[3]?.toLowerCase();
+    if (!storeId) throw new Error('BLOB_READ_WRITE_TOKEN is not a Vercel Blob read-write token');
+    return `https://${storeId}.public.blob.vercel-storage.com/${key.split('/').map(encodeURIComponent).join('/')}`;
+  }
+
+  async get(key: string): Promise<Buffer | null> {
+    // A query string skips any CDN copy of an earlier answer for this path.
+    const res = await fetch(`${this.urlFor(key)}?check=${Date.now()}`);
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`Reading ${key} from Vercel Blob failed: HTTP ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+
+  async directUpload(key: string, contentType: string, maxBytes: number): Promise<DirectUploadTarget> {
+    const clientToken = await generateClientTokenFromReadWriteToken({
+      token: this.token,
+      pathname: key,
+      allowedContentTypes: [contentType],
+      maximumSizeInBytes: maxBytes,
+      validUntil: Date.now() + DIRECT_UPLOAD_TTL_MS,
+      addRandomSuffix: false,
+      allowOverwrite: false,
+      cacheControlMaxAge: CACHE_SECONDS,
+    });
+    return { method: 'vercel-blob', pathname: key, clientToken };
+  }
+
   keyOf(url: string): string | null {
     const u = parseUrl(url);
     if (!u) return null;
@@ -78,6 +129,14 @@ export class DisabledStorage implements ObjectStorage {
   async delete(): Promise<void> {}
 
   keyOf(): string | null {
+    return null;
+  }
+
+  urlFor(): string {
+    throw uploadsNotConfigured();
+  }
+
+  async get(): Promise<Buffer | null> {
     return null;
   }
 }
