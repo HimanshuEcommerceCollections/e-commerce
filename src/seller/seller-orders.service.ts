@@ -8,6 +8,9 @@ import type { AdminOrderService } from '../admin/orders.service';
 import type { AdminReturnService } from '../admin/returns.service';
 import { SELLER_PAYOUTS } from '../config';
 import type { Actor } from './submission.service';
+import { logger } from '../common/logger';
+
+const log = logger('seller-payouts');
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -314,32 +317,56 @@ export class SellerOrderService {
         bySeller.set(merchantId, [...(bySeller.get(merchantId) ?? []), { orderId: o.id, deliveredAt: o.deliveredAt!, sales, refunds }]);
       }
     }
+    // Only sellers are paid out: the store's own products (admin or catalog accounts) are not.
+    const sellers = new Set(
+      (await this.prisma.user.findMany({ where: { id: { in: [...bySeller.keys()] }, role: 'ROLE_MERCHANT' }, select: { id: true } })).map((u) => u.id),
+    );
     const created: string[] = [];
+    const failed: string[] = [];
     for (const [merchantId, orders] of bySeller) {
+      if (!sellers.has(merchantId)) continue;
       const items = orders.map((o) => ({ ...o, ...split(o.sales, o.refunds) }));
       const total = (k: 'sales' | 'refunds' | 'commission' | 'net') => items.reduce((a, i) => a.plus(i[k]), new Prisma.Decimal(0));
-      const reference = await this.nextReference();
-      await this.prisma.sellerPayout.create({
-        data: {
-          reference,
-          merchantId,
-          periodFrom: items.reduce((a, i) => (i.deliveredAt < a ? i.deliveredAt : a), items[0]!.deliveredAt),
-          periodTo: cutoff,
-          scheduledFor,
-          status: 'SCHEDULED',
-          orders: items.length,
-          sales: total('sales'),
-          commission: total('commission'),
-          refunds: total('refunds'),
-          net: total('net'),
-          items: {
-            create: items.map((i) => ({ merchantId, orderId: i.orderId, deliveredAt: i.deliveredAt, sales: i.sales, commission: i.commission, refunds: i.refunds, net: i.net })),
-          },
-        },
-      });
-      created.push(reference);
+      // One seller's payout failing must not hold up the others; the next run picks it up again.
+      try {
+        const reference = await this.createPayout(merchantId, cutoff, scheduledFor, items, total);
+        created.push(reference);
+      } catch (e) {
+        failed.push(merchantId);
+        log.error(`Closing the payout for seller ${merchantId} failed`, e);
+      }
     }
-    return { cutoff, scheduledFor, payouts: created };
+    return { cutoff, scheduledFor, payouts: created, failed };
+  }
+
+  /** One SCHEDULED payout with its orders. */
+  private async createPayout(
+    merchantId: string,
+    cutoff: Date,
+    scheduledFor: Date,
+    items: { orderId: string; deliveredAt: Date; sales: Prisma.Decimal; refunds: Prisma.Decimal; commission: Prisma.Decimal; net: Prisma.Decimal }[],
+    total: (k: 'sales' | 'refunds' | 'commission' | 'net') => Prisma.Decimal,
+  ): Promise<string> {
+    const reference = await this.nextReference();
+    await this.prisma.sellerPayout.create({
+      data: {
+        reference,
+        merchantId,
+        periodFrom: items.reduce((a, i) => (i.deliveredAt < a ? i.deliveredAt : a), items[0]!.deliveredAt),
+        periodTo: cutoff,
+        scheduledFor,
+        status: 'SCHEDULED',
+        orders: items.length,
+        sales: total('sales'),
+        commission: total('commission'),
+        refunds: total('refunds'),
+        net: total('net'),
+        items: {
+          create: items.map((i) => ({ merchantId, orderId: i.orderId, deliveredAt: i.deliveredAt, sales: i.sales, commission: i.commission, refunds: i.refunds, net: i.net })),
+        },
+      },
+    });
+    return reference;
   }
 
   /** Admin: payouts across sellers, newest first. */

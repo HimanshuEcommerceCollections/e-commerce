@@ -226,4 +226,20 @@ describe('payouts', () => {
     const list = await as(admin).get('/api/admin/payouts?status=PAID');
     expect(list.body.data.content.some((p: { reference: string }) => p.reference === mine.reference)).toBe(true);
   });
+
+  it('pays only sellers: not the store’s own products, and a broken line never blocks the others', async () => {
+    const lastWeek = new Date(Date.now() - 9 * 24 * 3_600_000);
+    const mine = await order([{ sku, qty: 1 }], { status: 'DELIVERED', deliveredAt: lastWeek });
+    // A line whose merchant is not a user (bad data) and one of an admin's own product.
+    const stray = await order([{ sku, qty: 1 }], { status: 'DELIVERED', deliveredAt: lastWeek });
+    await prisma.orderItem.updateMany({ where: { orderId: stray.id }, data: { merchantId: randomUUID() } });
+    const adminUser = await prisma.user.findFirstOrThrow({ where: { role: 'ROLE_ADMIN' } });
+    const store = await order([{ sku, qty: 1 }], { status: 'DELIVERED', deliveredAt: lastWeek });
+    await prisma.orderItem.updateMany({ where: { orderId: store.id }, data: { merchantId: adminUser.id } });
+
+    const result = await container.sellerOrders.closeWeek();
+    expect(result.failed).toEqual([]);
+    expect(await prisma.sellerPayoutItem.count({ where: { orderId: mine.id } })).toBe(1);
+    expect(await prisma.sellerPayoutItem.count({ where: { orderId: { in: [stray.id, store.id] } } })).toBe(0);
+  });
 });
