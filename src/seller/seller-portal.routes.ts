@@ -9,6 +9,7 @@ import type { Container } from '../container';
 import { CatalogFileReader } from '../product/importer/file-reader';
 import { ORDER_FILTERS, PriceChangeSchema, SellerPortalService, type OrderFilter } from './seller-portal.service';
 import type { Actor } from './submission.service';
+import { ReturnApproveSchema, SELLER_ORDER_TABS, SellerCancelSchema, ShipSchema, type SellerOrderTab } from './seller-orders.service';
 
 const actor = (req: express.Request): Actor => {
   const u = currentUser(req);
@@ -81,6 +82,55 @@ export function sellerPortalRoutes(c: Container): Router {
   });
   r.get('/earnings', async (req, res) => {
     res.json(ok(await svc.earnings(actor(req), intQuery(req, 'months', 6, 1, 24))));
+  });
+
+  // ── Orders & earnings (designs/seller/seller-orders.html) ──
+  const orders = c.sellerOrders;
+  const tabOf = (req: express.Request): SellerOrderTab => {
+    const raw = typeof req.query.tab === 'string' && req.query.tab ? req.query.tab : 'new';
+    if (!(SELLER_ORDER_TABS as readonly string[]).includes(raw)) throw new ValidationError({ tab: `must be one of ${SELLER_ORDER_TABS.join(', ')}` });
+    return raw as SellerOrderTab;
+  };
+  const orderNumber = (req: express.Request) => {
+    const n = String(req.params.orderNumber ?? '');
+    if (!/^[A-Za-z0-9-]{1,40}$/.test(n)) throw new ValidationError({ orderNumber: 'is not an order number' });
+    return n;
+  };
+  r.get('/orders/list', async (req, res) => {
+    const pageable = parsePageable(req, { sort: 'paidAt,desc', allowedSorts: ['paidAt'] });
+    const q = typeof req.query.q === 'string' ? req.query.q.slice(0, 100) : undefined;
+    res.json(ok(await orders.list(actor(req), tabOf(req), q, pageable)));
+  });
+  r.get('/orders/overview', async (req, res) => {
+    res.json(ok(await orders.overview(actor(req))));
+  });
+  r.get('/orders/export', async (req, res) => {
+    const csv = await orders.exportCsv(actor(req), tabOf(req));
+    res.type('text/csv; charset=utf-8').attachment('orders.csv').send(csv);
+  });
+  r.get('/orders/:orderNumber', async (req, res) => {
+    res.json(ok(await orders.get(actor(req), orderNumber(req))));
+  });
+  r.post('/orders/:orderNumber/ship', async (req, res) => {
+    const n = orderNumber(req);
+    res.json(ok(await orders.ship(actor(req), n, parseBody(ShipSchema, req.body)), `${n} marked as shipped. The customer has the tracking link.`));
+  });
+  r.post('/orders/:orderNumber/cancel', async (req, res) => {
+    const n = orderNumber(req);
+    res.json(ok(await orders.cancel(actor(req), n, parseBody(SellerCancelSchema, req.body)), `${n} cancelled. The customer has been refunded.`));
+  });
+  r.post('/orders/:orderNumber/return/approve', async (req, res) => {
+    const n = orderNumber(req);
+    res.json(ok(await orders.approveReturn(actor(req), n, parseBody(ReturnApproveSchema, req.body ?? {})), 'Return approved. The customer gets a prepaid label.'));
+  });
+  r.get('/payouts', async (req, res) => {
+    res.json(ok(await orders.payouts(actor(req))));
+  });
+  r.get('/payouts/:reference/statement', async (req, res) => {
+    const ref = String(req.params.reference ?? '');
+    if (!/^PO-\d{1,10}$/.test(ref)) throw new ValidationError({ reference: 'is not a payout reference' });
+    const s = await orders.statementCsv(actor(req), ref);
+    res.type('text/csv; charset=utf-8').attachment(s.fileName).send(s.csv);
   });
   return r;
 }
