@@ -545,7 +545,7 @@ function parseImages(r: RowResult): string[] {
   const thumbnail = r.str(COLUMNS.THUMBNAIL_URL);
   if (urls.length === 0 && thumbnail) urls.push(thumbnail);
   if (urls.length === 0 && !IMAGE_COLUMNS.some((c) => r.row.get(c)) && !r.row.get(COLUMNS.THUMBNAIL_URL)) {
-    r.reject('At least one image URL (Image_1_URL … Image_5_URL) is required');
+    r.reject('At least one image URL (Image_1_URL … Image_10_URL) is required');
   }
   return [...new Set(urls)];
 }

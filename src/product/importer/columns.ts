@@ -61,6 +61,11 @@ export const COLUMNS = {
   IMAGE_3_URL: col('Image_3_URL'),
   IMAGE_4_URL: col('Image_4_URL'),
   IMAGE_5_URL: col('Image_5_URL'),
+  IMAGE_6_URL: col('Image_6_URL'),
+  IMAGE_7_URL: col('Image_7_URL'),
+  IMAGE_8_URL: col('Image_8_URL'),
+  IMAGE_9_URL: col('Image_9_URL'),
+  IMAGE_10_URL: col('Image_10_URL'),
   THUMBNAIL_URL: col('Thumbnail_URL'),
   LIFESTYLE_IMAGE_URL: col('Lifestyle_Image_URL'),
   SIZE_CHART_URL: col('Size_Chart_URL'),
@@ -81,6 +86,11 @@ export const IMAGE_COLUMNS = [
   COLUMNS.IMAGE_3_URL,
   COLUMNS.IMAGE_4_URL,
   COLUMNS.IMAGE_5_URL,
+  COLUMNS.IMAGE_6_URL,
+  COLUMNS.IMAGE_7_URL,
+  COLUMNS.IMAGE_8_URL,
+  COLUMNS.IMAGE_9_URL,
+  COLUMNS.IMAGE_10_URL,
 ];
 
 /** Images stored on the parent product. */
