@@ -56,6 +56,7 @@ import { SecretBox } from './integrations/secret-box';
 import { GootenService } from './vendor/gooten/gooten.service';
 import { SupplierOnboardingService } from './supplier/onboarding.service';
 import { SellerOrderService } from './seller/seller-orders.service';
+import { SellerTicketService } from './seller/tickets.service';
 
 /** Every service, wired once. Tests build one with a scripted gateway. */
 export interface Container {
@@ -146,6 +147,8 @@ export interface Container {
   supplierOnboarding: SupplierOnboardingService;
   /** Sellers' orders: ship, cancel, returns, earnings and weekly payouts. */
   sellerOrders: SellerOrderService;
+  /** Seller Help & support tickets and their staff side. */
+  sellerTickets: SellerTicketService;
 }
 
 export function createContainer(
@@ -221,6 +224,7 @@ export function createContainer(
     adminOrders,
     adminReturns,
     sellerOrders: new SellerOrderService(prisma, adminOrders, adminReturns),
+    sellerTickets: new SellerTicketService(prisma, mailer, config),
     adminCustomers: new AdminCustomerService(prisma),
     adminInbox: new AdminInboxService(prisma),
     adminPromotions: new AdminPromotionService(prisma),

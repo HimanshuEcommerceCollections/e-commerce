@@ -10,6 +10,7 @@ import type { Container } from '../container';
 import { templateCsv } from '../product/importer/template';
 import { CATALOG_ROLES } from '../routes';
 import { sellerPortalRoutes } from './seller-portal.routes';
+import { sellerTicketRoutes } from './tickets.routes';
 import {
   RequiredNoteSchema,
   StockUpdateSchema,
@@ -110,6 +111,7 @@ export function sellerRoutes(c: Container): Router {
     res.json(ok(data, `Stock updated for ${data.updated.length} SKU(s)`));
   });
   r.use(sellerPortalRoutes(c));
+  r.use(sellerTicketRoutes(c));
   return r;
 }
 
