@@ -23,17 +23,24 @@ export interface Harness {
  * rate limiting off unless the env says otherwise. Call at the top of a test
  * file; the client disconnects after the file.
  */
-export function harness(options: { gateway?: PaymentGateway; storage?: ObjectStorage; env?: Record<string, string> } = {}): Harness {
+export function harness(
+  options: {
+    gateway?: PaymentGateway;
+    storage?: ObjectStorage;
+    /** Image URL checks are off in tests (no network) unless a file opts in here (FR-IM-08 tests). */
+    imageChecks?: Partial<Config['imageChecks']>;
+    env?: Record<string, string>;
+  } = {},
+): Harness {
   const config = loadConfig({
     DATABASE_URL: inject('databaseUrl'),
     JWT_SECRET: 'test-only-secret-test-only-secret-0123456789',
     PAYMENT_PROVIDER: 'manual',
     RATE_LIMIT_ENABLED: 'false',
     LOG_LEVEL: 'error',
-    // No network in tests: image URL checks are opted into per file (FR-IM-08 tests).
-    IMAGE_CHECKS_ENABLED: 'false',
     ...options.env,
   });
+  config.imageChecks = { ...config.imageChecks, enabled: false, ...options.imageChecks };
   const prisma = new PrismaClient({ datasourceUrl: config.databaseUrl });
   const container = createContainer(config, prisma, { gateway: options.gateway, storage: options.storage });
   const app = createApp(container);

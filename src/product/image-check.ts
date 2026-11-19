@@ -99,7 +99,7 @@ export async function checkUrls(
 
 /**
  * Stores URL check results on product_images (check_status, check_error,
- * checked_at). Checks are on when IMAGE_CHECKS_ENABLED; off, images stay
+ * checked_at). Checks are on per IMAGE_CHECKS (src/config.ts); off, images stay
  * unchecked (check_status null).
  */
 export class ImageCheckService {

@@ -76,7 +76,7 @@ export interface CatalogImportReport {
   errors: RowError[];
   warnings: ImportWarning[];
   imageErrors: ImportImageError[];
-  /** False when image URL checks are switched off (IMAGE_CHECKS_ENABLED=false). */
+  /** False when image URL checks are switched off (IMAGE_CHECKS in src/config.ts, or off in tests). */
   imagesChecked: boolean;
   durationMs: number;
 }
