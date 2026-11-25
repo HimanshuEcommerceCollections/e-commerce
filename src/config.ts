@@ -200,6 +200,15 @@ const EnvSchema = z.object({
   // A price change of at least this many percent is flagged for a closer look.
   REVIEW_BIG_PRICE_CHANGE_PERCENT: z.coerce.number().min(0).max(1000).default(30),
 
+  // ── CRM (Admin › CRM) ──
+  // Help-center messages, seller tickets and seller applications are copied into the CRM
+  // when someone opens it, at most this often (milliseconds; 0 = every request).
+  CRM_SYNC_INTERVAL_MS: z.coerce.number().int().min(0).default(5000),
+  // A customer with no order for this many days is "At risk".
+  CRM_AT_RISK_DAYS: z.coerce.number().int().min(1).default(90),
+  // A supplier in one pipeline stage this many days is "stuck".
+  CRM_STUCK_DAYS: z.coerce.number().int().min(1).default(7),
+
   // ── Vendor API integrations (Admin › Settings › API integrations) ──
   // Seals the vendor secrets stored in the database. Any string; when unset a
   // key is derived from JWT_SECRET, so changing JWT_SECRET then means
@@ -269,6 +278,7 @@ export interface Config {
   passwordReset: { ttlMinutes: number };
   /** Review queue automatic checks. */
   reviewChecks: { restrictedBrands: string[]; marginFloorPercent: number; bigPriceChangePercent: number };
+  crm: { syncIntervalMs: number; atRiskDays: number; stuckDays: number };
   integrations: {
     /** 32-byte AES key for vendor secrets. */
     encryptionKey: Buffer;
@@ -378,6 +388,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       marginFloorPercent: e.REVIEW_MARGIN_FLOOR_PERCENT,
       bigPriceChangePercent: e.REVIEW_BIG_PRICE_CHANGE_PERCENT,
     },
+    crm: { syncIntervalMs: e.CRM_SYNC_INTERVAL_MS, atRiskDays: e.CRM_AT_RISK_DAYS, stuckDays: e.CRM_STUCK_DAYS },
     integrations: {
       encryptionKey: createHash('sha256')
         .update(e.INTEGRATIONS_ENCRYPTION_KEY || `integrations:${e.JWT_SECRET}`)
