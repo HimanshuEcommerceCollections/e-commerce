@@ -13,6 +13,7 @@ import { adminInboxRoutes } from './admin/inbox.routes';
 import { adminPromotionRoutes } from './admin/promotions.routes';
 import { adminPayoutRoutes } from './admin/payouts.routes';
 import { adminSellerTicketRoutes } from './seller/tickets.routes';
+import { adminCrmRoutes } from './crm/crm.routes';
 import { adminReviewRoutes } from './admin/reviews.routes';
 import { adminGiftCardRoutes } from './admin/gift-cards.routes';
 import { accountShoppingRoutes, productReviewRoutes, reviewRoutes } from './account/account-shopping.routes';
@@ -99,6 +100,7 @@ export function createApp(c: Container): Express {
   app.use('/api/admin', adminPromotionRoutes(c));
   app.use('/api/admin', adminPayoutRoutes(c));
   app.use('/api/admin', adminSellerTicketRoutes(c));
+  app.use('/api/admin', adminCrmRoutes(c));
   app.use('/api/admin', adminReviewRoutes(c));
   app.use('/api/admin', adminGiftCardRoutes(c));
   app.use('/api/admin', adminCatalogRoutes(c));

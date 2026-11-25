@@ -89,6 +89,8 @@ export class CatalogExportService {
 
   /** The live template row of each SKU, by SKU (the "before" of a seller edit), with all its attributes. */
   async records(skus: string[]): Promise<Map<string, Record<string, string>>> {
+    // A malformed submission row can lack its SKU; skip it rather than fail the whole read.
+    skus = skus.filter((s): s is string => typeof s === 'string' && s !== '');
     if (!skus.length) return new Map();
     const products = await this.prisma.product.findMany({
       where: { sku: { in: skus }, deleted: false, parent: { deleted: false } },

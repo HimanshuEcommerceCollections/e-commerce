@@ -55,6 +55,7 @@ TEST_DATABASE_URL=postgresql://... npm test   # or point the tests at an empty d
 | `src/cart/`, `src/order/` | Cart, checkout, cancellation, payment-event handling, pending-order expiry |
 | `src/payment/` | Gateway interface, manual and Stripe gateways, webhook store and service |
 | `src/seller/` | Seller portal: submissions, the review queue and seller stock |
+| `src/crm/` | CRM for the admin team: customers, the supplier pipeline, tickets, tasks, dashboard |
 | `prisma/` | Schema and migrations |
 | `test/` | Vitest integration tests against a real Postgres |
 | `postman/` | Postman collection, environment and a sample import file |
@@ -111,6 +112,28 @@ Admin only (`ROLE_ADMIN`):
 - `/api/admin/customers/stats`: KPI tiles and segment counts. The customer list and export accept `segment=new|repeat|none`.
 
 The public help-center and "Sell with us" POSTs share the auth rate limiter's per-IP bucket.
+
+## CRM (Admin › CRM)
+
+`designs/crm`, inside the admin portal. **ROLE_ADMIN only** (it shows customers' contact details and spend); everything is under `/api/admin/crm`. Team members are the admins; an owner or assignee must be one of them.
+
+| | |
+|---|---|
+| `GET /meta`, `/team`, `/summary` | Vocabulary (types, priorities, stages, reply-time targets), the team and who is asking, ticket counts for the nav badge |
+| `GET /dashboard`, `/notifications`, `/search?q=` | Counts and lists for "today"; derived alerts (past reply time, my tasks due, unassigned, suppliers stuck); customers, suppliers and tickets matching a word |
+| `GET /tickets?view=mine|unassigned|overdue|open|pending|solved&who=&q=&page=&size=` | The queue, soonest reply due first, with a count per view |
+| `POST /tickets`, `GET /tickets/:ref`, `PATCH /tickets/:ref`, `POST /tickets/:ref/messages` | Open a ticket for a customer or supplier; read it (`TK-5312`); change status, priority or assignee; reply (`mode: reply`, `after: pending|solved`) or add an internal note |
+| `GET/POST /customers`, `GET/PATCH /customers/:id`, `POST /customers/:id/activities` | Customers with orders, spend and tags; add one by hand; owner and VIP; notes, calls and emails |
+| `GET/POST /suppliers`, `GET/PATCH /suppliers/:id`, `POST /suppliers/:id/stage`, `POST /suppliers/:id/activities` | The pipeline board, a profile, owner and next step, moving a stage (`lost` needs a `reason`), notes, calls and emails |
+| `GET/POST /tasks`, `PATCH/DELETE /tasks/:id` | Follow-ups; `owner=me|all|<id>`, `tab=today|up|done`; `tz` is the browser's `getTimezoneOffset()` so "today" is the admin's today |
+
+How it fits with the rest:
+
+- **Tickets raised elsewhere arrive on their own.** Help-center messages (`support_messages`) and Seller Portal tickets (`seller_tickets`) are copied into `crm_tickets` whenever someone reads the CRM (at most every `CRM_SYNC_INTERVAL_MS`, 5 s), keyed by the source row's id so each is copied once. Nothing in the shop or the Seller Portal knows the CRM exists. A seller's new message or status change on their side shows up on the next read.
+- **Replies go the way the person wrote in.** A reply on a Seller Portal ticket is posted to the seller's thread (and emailed) through the same service as the Seller tickets page; a reply on a help-center ticket is emailed. Solving or reopening in the CRM updates the original (`seller_tickets.status`, `support_messages.status`). Replies made on the old pages appear in the CRM on the next read.
+- **Customers** exist for every customer account (created on first sight) plus people added by hand, who are linked to their account if they later sign up with the same email. Orders, spend (paid, net of refunds) and last order use the same definitions as Admin › Customers. **New** (account under 30 days), **Repeat** (2+ orders) and **At risk** (an order, but none for `CRM_AT_RISK_DAYS`, 90) are worked out; **VIP** is set by hand.
+- **Suppliers** follow seller applications: a card appears for every application, and moves when the application's stage changes (applied → in review → documents → live, or lost on a decline). A card moved by hand stays there until the application moves again. Leads can also be added by hand; old "Sell with us" leads start as Lead / Contacted. A supplier in one open stage for `CRM_STUCK_DAYS` (7) is "stuck".
+- A ticket's **reply clock** is set by priority (urgent 4 h, high 8 h, normal 24 h, low 72 h); an open ticket past it is "past reply time". A reply that waits on them stops the clock; when they write back it starts again.
 
 ## Storefront catalog, promotions and tax
 

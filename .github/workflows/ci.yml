@@ -36,7 +36,6 @@ jobs:
 
       - run: npm ci   # postinstall runs prisma generate
       - run: npm run typecheck
-      - run: npx tsc -p tsconfig.build.json
 
       - name: Test (against the service Postgres)
         env:

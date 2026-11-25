@@ -57,6 +57,7 @@ import { GootenService } from './vendor/gooten/gooten.service';
 import { SupplierOnboardingService } from './supplier/onboarding.service';
 import { SellerOrderService } from './seller/seller-orders.service';
 import { SellerTicketService } from './seller/tickets.service';
+import { createCrm, type CrmModule } from './crm/crm.module';
 
 /** Every service, wired once. Tests build one with a scripted gateway. */
 export interface Container {
@@ -149,6 +150,8 @@ export interface Container {
   sellerOrders: SellerOrderService;
   /** Seller Help & support tickets and their staff side. */
   sellerTickets: SellerTicketService;
+  /** CRM (designs/crm): customers, suppliers, tickets, tasks and dashboard for the admin team. */
+  crm: CrmModule;
 }
 
 export function createContainer(
@@ -189,6 +192,7 @@ export function createContainer(
   const audit = new AuditService(prisma);
   const adminOrders = new AdminOrderService(prisma, gateway, orders, shipping, mailer, config);
   const adminReturns = new AdminReturnService(prisma, gateway, mailer, config);
+  const sellerTickets = new SellerTicketService(prisma, mailer, config);
   const submissions = new SellerSubmissionService(prisma, catalogReader, catalogImport, catalogExport, imageChecks, mailer, config, audit);
 
   return {
@@ -224,7 +228,8 @@ export function createContainer(
     adminOrders,
     adminReturns,
     sellerOrders: new SellerOrderService(prisma, adminOrders, adminReturns),
-    sellerTickets: new SellerTicketService(prisma, mailer, config),
+    sellerTickets,
+    crm: createCrm(prisma, config, mailer, sellerTickets),
     adminCustomers: new AdminCustomerService(prisma),
     adminInbox: new AdminInboxService(prisma),
     adminPromotions: new AdminPromotionService(prisma),

@@ -337,7 +337,7 @@ export class ReviewQueueService {
     if (!rows.length) return [];
     const skusOf = (r: Row) =>
       r.kind === 'EDIT'
-        ? ((r.payload as { rows?: Record<string, string>[] }).rows ?? []).map((x) => x[K.sku])
+        ? ((r.payload as { rows?: Record<string, string>[] }).rows ?? []).map((x) => x[K.sku]).filter(Boolean)
         : r.kind === 'NEW_PRODUCT'
           ? Object.keys((r.payload as { requestedStatus?: Record<string, string> }).requestedStatus ?? {})
           : [];

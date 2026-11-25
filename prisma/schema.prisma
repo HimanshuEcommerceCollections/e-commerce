@@ -67,6 +67,8 @@ model User {
   sellerPayouts       SellerPayout[]
   sellerTickets       SellerTicket[]          @relation("SellerTicketMerchant")
   assignedTickets     SellerTicket[]          @relation("SellerTicketAssignee")
+  crmCustomer         CrmCustomer?
+  crmSupplier         CrmSupplier?
 
   @@map("users")
 }
@@ -609,8 +611,9 @@ model SellerApplication {
   reinstatedAt              DateTime? @map("reinstated_at") @db.Timestamptz(6)
   lastReminderAt            DateTime? @map("last_reminder_at") @db.Timestamptz(6)
 
-  user      User?            @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_seller_applications_user")
-  documents SellerDocument[]
+  user        User?            @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_seller_applications_user")
+  documents   SellerDocument[]
+  crmSupplier CrmSupplier?
 
   @@index([status, createdAt], map: "idx_seller_applications_status")
   @@index([stage, submittedAt], map: "idx_seller_applications_stage")
@@ -1170,4 +1173,190 @@ model SellerTicketAttachment {
 
   @@index([messageId], map: "idx_seller_ticket_attachments_message")
   @@map("seller_ticket_attachments")
+}
+
+// ── CRM (designs/crm) ───────────────────────────────────────────────────────
+// The people the team looks after (customers and suppliers), their tickets,
+// tasks and history. Staff are users with ROLE_ADMIN; owner/author ids are plain
+// references to them (staff are soft-deleted, never removed).
+
+/// A customer in the CRM: one per customer account (created on first sight),
+/// plus contacts added by hand for phone or email enquiries (userId null).
+model CrmCustomer {
+  id        String   @id @default(uuid()) @db.Uuid
+  /// Shown as C-1001, C-1002…
+  number    Int      @unique(map: "uk_crm_customers_number") @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  userId    String?  @unique(map: "uk_crm_customers_user") @map("user_id") @db.Uuid
+  /// Contact details of a hand-added customer; an account's come from the user.
+  name      String?  @db.VarChar(200)
+  email     String?  @db.VarChar(255)
+  phone     String?  @db.VarChar(30)
+  ownerId   String?  @map("owner_id") @db.Uuid
+  /// Tags set by the team (VIP); New, Repeat and At risk are worked out from orders.
+  tags      String[] @default([])
+
+  user       User?         @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_crm_customers_user")
+  tickets    CrmTicket[]
+  tasks      CrmTask[]
+  activities CrmActivity[]
+
+  @@index([ownerId], map: "idx_crm_customers_owner")
+  @@map("crm_customers")
+}
+
+/// A supplier in the pipeline, from first contact to live. Rows follow seller
+/// applications (stage, company, contact) and can also be added as leads.
+model CrmSupplier {
+  id             String    @id @default(uuid()) @db.Uuid
+  /// Shown as S-301, S-302…
+  number         Int       @unique(map: "uk_crm_suppliers_number") @default(autoincrement())
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  company        String    @db.VarChar(200)
+  contactName    String?   @map("contact_name") @db.VarChar(200)
+  email          String?   @db.VarChar(255)
+  phone          String?   @db.VarChar(30)
+  location       String?   @db.VarChar(200)
+  category       String?   @db.VarChar(120)
+  /// lead | contacted | interested | applied | review | documents | live | lost
+  stage          String    @db.VarChar(12)
+  stageChangedAt DateTime  @map("stage_changed_at") @db.Timestamptz(6)
+  estProducts    Int       @default(0) @map("est_products")
+  /// Outreach | Inbound | Referral | Trade show | Instagram | Seller Portal
+  source         String    @db.VarChar(30)
+  ownerId        String?   @map("owner_id") @db.Uuid
+  nextStep       String?   @map("next_step") @db.VarChar(300)
+  nextDue        DateTime? @map("next_due") @db.Timestamptz(6)
+  lostReason     String?   @map("lost_reason") @db.VarChar(500)
+  /// The merchant account, once the supplier has one.
+  userId         String?   @unique(map: "uk_crm_suppliers_user") @map("user_id") @db.Uuid
+  applicationId  String?   @unique(map: "uk_crm_suppliers_application") @map("application_id") @db.Uuid
+  /// The application's "stage:status" when last copied here: only a change moves the card.
+  appStage       String?   @map("app_stage") @db.VarChar(40)
+
+  user        User?              @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_crm_suppliers_user")
+  application SellerApplication? @relation(fields: [applicationId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_crm_suppliers_application")
+  tickets     CrmTicket[]
+  tasks       CrmTask[]
+  activities  CrmActivity[]
+
+  @@index([stage, stageChangedAt], map: "idx_crm_suppliers_stage")
+  @@index([ownerId], map: "idx_crm_suppliers_owner")
+  @@map("crm_suppliers")
+}
+
+/// A conversation with a customer or supplier. Tickets raised in the help
+/// center and the Seller Portal arrive here on their own (source +
+/// sourceRef); the team can also open one for anyone.
+model CrmTicket {
+  id             String    @id @default(uuid()) @db.Uuid
+  /// Shown as TK-5301, TK-5302…
+  number         Int       @unique(map: "uk_crm_tickets_number") @default(autoincrement())
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  subject        String    @db.VarChar(200)
+  /// Order | Delivery | Return / refund | Product question | Account | Listing issue | Stock / feed | Documents | Payouts | Other
+  category       String    @db.VarChar(30)
+  /// urgent | high | normal | low
+  priority       String    @db.VarChar(10)
+  /// open | pending (waiting on them) | solved
+  status         String    @db.VarChar(10)
+  /// Where it came from: Help center, Seller Portal, Email, Phone, Chat, Created by team
+  channel        String    @db.VarChar(30)
+  /// customer | supplier
+  requesterKind  String    @map("requester_kind") @db.VarChar(10)
+  customerId     String?   @map("customer_id") @db.Uuid
+  supplierId     String?   @map("supplier_id") @db.Uuid
+  /// Who wrote in, kept even when there is no profile (a guest's help-center message).
+  requesterName  String    @map("requester_name") @db.VarChar(200)
+  requesterEmail String?   @map("requester_email") @db.VarChar(255)
+  ownerId        String?   @map("owner_id") @db.Uuid
+  slaDueAt       DateTime  @map("sla_due_at") @db.Timestamptz(6)
+  lastMessageAt  DateTime  @map("last_message_at") @db.Timestamptz(6)
+  solvedAt       DateTime? @map("solved_at") @db.Timestamptz(6)
+  /// STAFF | HELP_CENTER | SELLER_PORTAL
+  source         String    @default("STAFF") @db.VarChar(20)
+  /// Id of the support message / seller ticket this one follows.
+  sourceRef      String?   @map("source_ref") @db.VarChar(80)
+  /// The source's own number (HC-…, T-…), for people to search by.
+  externalRef    String?   @map("external_ref") @db.VarChar(40)
+  /// When the source was last copied here.
+  syncedAt       DateTime? @map("synced_at") @db.Timestamptz(6)
+
+  customer CrmCustomer?       @relation(fields: [customerId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_crm_tickets_customer")
+  supplier CrmSupplier?       @relation(fields: [supplierId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_crm_tickets_supplier")
+  messages CrmTicketMessage[]
+
+  @@unique([source, sourceRef], map: "uk_crm_tickets_source")
+  @@index([status, slaDueAt], map: "idx_crm_tickets_status")
+  @@index([customerId], map: "idx_crm_tickets_customer")
+  @@index([supplierId], map: "idx_crm_tickets_supplier")
+  @@index([ownerId, status], map: "idx_crm_tickets_owner")
+  @@map("crm_tickets")
+}
+
+model CrmTicketMessage {
+  id         String   @id @default(uuid()) @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  ticketId   String   @map("ticket_id") @db.Uuid
+  /// requester | staff | note (internal, never sent)
+  kind       String   @db.VarChar(10)
+  authorId   String?  @map("author_id") @db.Uuid
+  authorName String   @map("author_name") @db.VarChar(200)
+  body       String   @db.VarChar(5000)
+  /// Id of the source message this copies (seller ticket messages).
+  sourceRef  String?  @map("source_ref") @db.VarChar(80)
+
+  ticket CrmTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_crm_ticket_messages_ticket")
+
+  @@unique([ticketId, sourceRef], map: "uk_crm_ticket_messages_source")
+  @@index([ticketId, createdAt], map: "idx_crm_ticket_messages_ticket")
+  @@map("crm_ticket_messages")
+}
+
+/// A follow-up with a due date, for one teammate, optionally about a customer or supplier.
+model CrmTask {
+  id         String    @id @default(uuid()) @db.Uuid
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  title      String    @db.VarChar(300)
+  ownerId    String?   @map("owner_id") @db.Uuid
+  dueAt      DateTime  @map("due_at") @db.Timestamptz(6)
+  doneAt     DateTime? @map("done_at") @db.Timestamptz(6)
+  customerId String?   @map("customer_id") @db.Uuid
+  supplierId String?   @map("supplier_id") @db.Uuid
+  createdBy  String?   @map("created_by") @db.Uuid
+
+  customer CrmCustomer? @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_crm_tasks_customer")
+  supplier CrmSupplier? @relation(fields: [supplierId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_crm_tasks_supplier")
+
+  @@index([ownerId, doneAt, dueAt], map: "idx_crm_tasks_owner")
+  @@index([customerId], map: "idx_crm_tasks_customer")
+  @@index([supplierId], map: "idx_crm_tasks_supplier")
+  @@map("crm_tasks")
+}
+
+/// One line of a customer's or supplier's history: a note, call, email, ticket, stage change or task.
+/// Exactly one of customerId / supplierId is set (a CHECK that only the migration's SQL holds).
+model CrmActivity {
+  id         String   @id @default(uuid()) @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  /// note | call | email | ticket | stage | task
+  kind       String   @db.VarChar(10)
+  body       String   @db.VarChar(2000)
+  authorId   String?  @map("author_id") @db.Uuid
+  /// Null for the system.
+  authorName String?  @map("author_name") @db.VarChar(200)
+  customerId String?  @map("customer_id") @db.Uuid
+  supplierId String?  @map("supplier_id") @db.Uuid
+
+  customer CrmCustomer? @relation(fields: [customerId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_crm_activities_customer")
+  supplier CrmSupplier? @relation(fields: [supplierId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_crm_activities_supplier")
+
+  @@index([customerId, createdAt(sort: Desc)], map: "idx_crm_activities_customer")
+  @@index([supplierId, createdAt(sort: Desc)], map: "idx_crm_activities_supplier")
+  @@index([createdAt(sort: Desc)], map: "idx_crm_activities_created")
+  @@map("crm_activities")
 }

@@ -247,7 +247,7 @@ describe('cleanup of unused image files', () => {
         status: 'SUBMITTED',
         source: 'FORM',
         submittedAt: new Date(),
-        payload: { headers: ['Image_1_URL'], rows: [{ image_1_url: inSubmission.url }] },
+        payload: { headers: ['SKU_ID', 'Image_1_URL'], rows: [{ SKU_ID: `CL-${run}-P1`, IMAGE_1_URL: inSubmission.url }] },
       },
     });
 
